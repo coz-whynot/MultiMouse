@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>MultiMouse Trackpad</title>
+<style>
+  :root { color-scheme: dark; --bg: #0b0b18; --panel: #15152b; --accent: #818cf8; --muted: rgba(255,255,255,0.55); }
+  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: #fff; font: 15px/1.3 -apple-system, Segoe UI, system-ui, sans-serif; overscroll-behavior: none; touch-action: none; }
+  #app { display: flex; flex-direction: column; height: 100dvh; gap: 8px; padding: 8px; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 2px 6px; font-size: 12px; color: var(--muted); }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: #f87171; display: inline-block; margin-right: 6px; transition: background .2s; }
+  header.connected .dot { background: #34d399; }
+  #pad { flex: 1; background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(168,85,247,0.04)); border: 1px solid rgba(255,255,255,0.09); border-radius: 18px; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.22); font-size: 13px; letter-spacing: .2px; position: relative; touch-action: none; }
+  #pad.active { background: linear-gradient(135deg, rgba(99,102,241,0.18), rgba(168,85,247,0.1)); border-color: rgba(129,140,248,0.35); }
+  #pad .hint { text-align: center; max-width: 75%; }
+  #pad .hint b { color: rgba(255,255,255,0.4); font-weight: 600; display: block; margin-bottom: 4px; font-size: 14px; }
+  .btnrow { display: flex; gap: 6px; height: 58px; }
+  .btnrow button { flex: 1; background: var(--panel); border: 1px solid rgba(255,255,255,0.07); color: #fff; font: inherit; font-weight: 600; border-radius: 14px; active:scale(0.97); transition: transform .08s, background .15s; }
+  .btnrow button:active { transform: scale(0.96); background: rgba(99,102,241,0.25); }
+  .btnrow button.mid { flex: 0.6; font-size: 11px; color: var(--muted); }
+  #kb { display: none; flex-direction: column; gap: 6px; }
+  #kb.on { display: flex; }
+  #kb input { background: var(--panel); border: 1px solid rgba(255,255,255,0.09); color: #fff; padding: 12px 14px; border-radius: 12px; font: inherit; outline: none; }
+  #kb input:focus { border-color: var(--accent); }
+  #kb .row { display: flex; gap: 6px; }
+  #kb .row button { flex: 1; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: #fff; padding: 10px; border-radius: 10px; font: inherit; font-size: 12px; }
+  #kb .row button:active { background: rgba(99,102,241,0.2); }
+  #toast { position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: #fff; padding: 8px 14px; border-radius: 20px; font-size: 12px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span><span class="dot"></span><span id="stat">Connecting…</span></span>
+    <span id="device"></span>
+  </header>
+
+  <div id="pad">
+    <div class="hint">
+      <b>Tap &amp; drag to move</b>
+      1-finger tap = click · 2-finger tap = right-click · 2-finger drag = scroll
+    </div>
+  </div>
+
+  <div class="btnrow">
+    <button data-btn="0">Left Click</button>
+    <button data-btn="1" class="mid">Right</button>
+    <button data-btn="2" class="mid">Middle</button>
+    <button id="kb-toggle" class="mid">⌨</button>
+  </div>
+
+  <div id="kb">
+    <input id="typer" type="text" placeholder="Type here — keys go to the computer" autocomplete="off" autocorrect="off" spellcheck="false">
+    <div class="row">
+      <button data-key="Return">↵ Enter</button>
+      <button data-key="Tab">⇥ Tab</button>
+      <button data-key="BackSpace">⌫ Back</button>
+      <button data-key="Escape">Esc</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  const qs = new URLSearchParams(location.search);
+  const token = qs.get('t') || '';
+  const header = document.querySelector('header');
+  const stat = document.getElementById('stat');
+  const deviceEl = document.getElementById('device');
+  const pad = document.getElementById('pad');
+  const toast = document.getElementById('toast');
+
+  let ws = null, retry = 0, sensitivity = 1.5;
+  const toastMsg = (msg) => { toast.textContent = msg; toast.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => toast.classList.remove('show'), 1500); };
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/ws?t=${encodeURIComponent(token)}`;
+    ws = new WebSocket(url);
+    ws.onopen = () => { stat.textContent = 'Connected'; header.classList.add('connected'); retry = 0; };
+    ws.onclose = () => {
+      stat.textContent = 'Reconnecting…'; header.classList.remove('connected');
+      retry = Math.min(retry + 1, 8);
+      setTimeout(connect, 500 * retry);
+    };
+    ws.onmessage = (e) => {
+      try {
+        const m = JSON.parse(e.data);
+        if (m.type === 'welcome' && m.device_name) deviceEl.textContent = m.device_name;
+      } catch {}
+    };
+  }
+  const send = (obj) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); };
+
+  // ── Trackpad gestures ──────────────────────────────────────────────────────
+  let touches = new Map();      // id → {x, y, startX, startY, startT, moved}
+  let mode = 'idle';            // 'idle' | 'move' | 'scroll' | 'maybe_tap'
+
+  pad.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      touches.set(t.identifier, { x: t.clientX, y: t.clientY, startX: t.clientX, startY: t.clientY, startT: performance.now(), moved: false });
+    }
+    pad.classList.add('active');
+    if (touches.size === 1) mode = 'maybe_tap';
+    else if (touches.size === 2) mode = 'maybe_rtap';
+  }, { passive: false });
+
+  pad.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const p = touches.get(t.identifier); if (!p) continue;
+      const dx = t.clientX - p.x, dy = t.clientY - p.y;
+      p.x = t.clientX; p.y = t.clientY;
+      if (Math.hypot(t.clientX - p.startX, t.clientY - p.startY) > 6) p.moved = true;
+      if (touches.size === 1) {
+        mode = 'move';
+        send({ type: 'move', dx: Math.round(dx * sensitivity), dy: Math.round(dy * sensitivity) });
+      } else if (touches.size === 2 && t.identifier === [...touches.keys()][0]) {
+        // use primary-finger delta for scroll; convert to scroll ticks
+        mode = 'scroll';
+        if (Math.abs(dy) > 2) send({ type: 'scroll', dx: 0, dy: Math.sign(dy) * -1 });
+      }
+    }
+  }, { passive: false });
+
+  pad.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const p = touches.get(t.identifier); if (!p) continue;
+      const dt = performance.now() - p.startT;
+      const wasTap = !p.moved && dt < 300;
+      touches.delete(t.identifier);
+      if (touches.size === 0) {
+        if (mode === 'maybe_tap' && wasTap) { send({ type: 'click', button: 0 }); toastMsg('click'); }
+        else if (mode === 'maybe_rtap' && wasTap) { send({ type: 'click', button: 1 }); toastMsg('right-click'); }
+        mode = 'idle';
+        pad.classList.remove('active');
+      }
+    }
+  }, { passive: false });
+
+  pad.addEventListener('touchcancel', () => { touches.clear(); mode = 'idle'; pad.classList.remove('active'); });
+
+  // ── Buttons ────────────────────────────────────────────────────────────────
+  document.querySelectorAll('.btnrow button[data-btn]').forEach(b => {
+    b.addEventListener('click', () => send({ type: 'click', button: Number(b.dataset.btn) }));
+  });
+
+  // ── Keyboard ───────────────────────────────────────────────────────────────
+  const kb = document.getElementById('kb');
+  const typer = document.getElementById('typer');
+  document.getElementById('kb-toggle').addEventListener('click', () => {
+    kb.classList.toggle('on');
+    if (kb.classList.contains('on')) typer.focus();
+  });
+  typer.addEventListener('input', (e) => {
+    const text = e.target.value;
+    if (text) send({ type: 'text', text });
+    e.target.value = '';
+  });
+  document.querySelectorAll('#kb .row button').forEach(b => {
+    b.addEventListener('click', () => send({ type: 'key', key: b.dataset.key }));
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>
