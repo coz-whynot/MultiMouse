@@ -95,6 +95,13 @@ pub fn run() {
             input::inject::start_injector();
             input::capture::start(app.handle().clone(), state.clone());
 
+            // Show window on first launch so the user sees something immediately.
+            // They can close it to the tray after that.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
