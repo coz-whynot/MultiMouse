@@ -5,14 +5,12 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      draft:
-        description: 'Create as draft release'
-        type: boolean
-        default: true
 
 jobs:
   build:
+    permissions:
+      contents: write
+
     strategy:
       fail-fast: false
       matrix:
@@ -72,14 +70,14 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build Tauri app
+      # On tag push: build + create GitHub release
+      - name: Build Tauri app (release)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional: set these secrets in your repo to enable update signing
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Optional: macOS code signing & notarization
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -103,16 +101,25 @@ jobs:
             - **macOS**: Open the `.dmg`, drag MultiMouse to Applications. On first run go to System Settings → Privacy & Security → Accessibility and enable MultiMouse.
             - **Windows**: Run the `.exe` installer. Windows Defender SmartScreen may warn on first run — click "More info → Run anyway".
             - **Linux**: `chmod +x MultiMouse_*.AppImage && ./MultiMouse_*.AppImage`
-
-            ## Self-host the relay server
-            For internet connections, build the relay binary:
-            ```
-            cd relay-server && cargo build --release
-            ./target/release/relay
-            ```
-            Then enter the server address in MultiMouse Settings → Internet Relay.
-          releaseDraft: ${{ github.event.inputs.draft != 'false' }}
+          releaseDraft: true
           prerelease: false
+          args: --target ${{ matrix.target }}
+
+      # On manual dispatch: just build, no release
+      - name: Build Tauri app (manual)
+        if: github.event_name == 'workflow_dispatch'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
           args: --target ${{ matrix.target }}
 
       - name: Upload macOS DMG
@@ -144,5 +151,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: relay-server-binaries
-          path: |
-            relay-server/target/release/relay
+          path: relay-server/target/release/relay
