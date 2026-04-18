@@ -1,0 +1,16 @@
+[package]
+name = "multimouse-relay"
+version = "0.1.0"
+description = "Relay server for MultiMouse internet connections"
+license = "MIT"
+edition = "2021"
+
+[[bin]]
+name = "relay"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rand = "0.8"
