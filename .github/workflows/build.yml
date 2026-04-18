@@ -1,10 +1,15 @@
-name: Build
+name: Build & Release
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Create as draft release'
+        type: boolean
+        default: true
 
 jobs:
   build:
@@ -14,14 +19,19 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+            label: macOS-arm64
           - os: macos-13
             target: x86_64-apple-darwin
+            label: macOS-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            label: Windows-x64
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            label: Linux-x64
 
     runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.label }}
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +44,9 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            relay-server
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -58,26 +70,58 @@ jobs:
             pkg-config
 
       - name: Install npm dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: set these secrets in your repo to enable update signing
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Optional: macOS code signing & notarization
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: MultiMouse ${{ github.ref_name }}
           releaseBody: |
-            ## What's new
-            See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md).
-
             ## Downloads
-            | Platform | File |
+
+            | Platform | Installer |
             |---|---|
-            | macOS (Apple Silicon) | `MultiMouse_*_aarch64.dmg` |
+            | macOS (Apple Silicon M1/M2/M3) | `MultiMouse_*_aarch64.dmg` |
             | macOS (Intel) | `MultiMouse_*_x64.dmg` |
-            | Windows | `MultiMouse_*_x64-setup.exe` |
+            | Windows 10/11 | `MultiMouse_*_x64-setup.exe` |
             | Linux | `MultiMouse_*_amd64.AppImage` |
-          releaseDraft: true
+
+            ## Setup
+            - **macOS**: Open the `.dmg`, drag MultiMouse to Applications. On first run go to System Settings → Privacy & Security → Accessibility and enable MultiMouse.
+            - **Windows**: Run the `.exe` installer. Windows Defender SmartScreen may warn on first run — click "More info → Run anyway".
+            - **Linux**: `chmod +x MultiMouse_*.AppImage && ./MultiMouse_*.AppImage`
+
+            ## Self-host the relay server
+            For internet connections, build the relay binary:
+            ```
+            cd relay-server && cargo build --release
+            ./target/release/relay
+            ```
+            Then enter the server address in MultiMouse Settings → Internet Relay.
+          releaseDraft: ${{ github.event.inputs.draft != 'false' }}
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      - name: Build relay server
+        run: cargo build --release --manifest-path relay-server/Cargo.toml
+
+      - name: Upload relay binary (macOS arm64 only)
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-server-binaries
+          path: |
+            relay-server/target/release/relay

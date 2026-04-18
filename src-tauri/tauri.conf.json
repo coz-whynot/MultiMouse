@@ -37,14 +37,5 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "PLACEHOLDER_PUBKEY",
-      "endpoints": [
-        "https://github.com/YOUR_USERNAME/MultiMouse/releases/latest/download/latest.json"
-      ],
-      "dialog": false
-    }
   }
 }
