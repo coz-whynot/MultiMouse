@@ -12,21 +12,27 @@ export const TitleBar = ({ onSettings }: Props) => {
       data-tauri-drag-region
       className="flex items-center justify-between px-4 h-12 flex-shrink-0"
     >
-      <div className="flex items-center gap-2" data-tauri-drag-region>
-        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-accent-500 to-purple-500
-          flex items-center justify-center shadow-lg shadow-accent-500/20">
-          <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v1h8v-1zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-1a5.97 5.97 0 00-.75-2.906A3.005 3.005 0 0119 15v1h-3zM4.75 14.094A5.97 5.97 0 004 17v1H1v-1a3 3 0 013.75-2.906z" />
+      <div className="flex items-center gap-2.5" data-tauri-drag-region>
+        <div
+          className="w-8 h-8 rounded-xl flex items-center justify-center"
+          style={{
+            background: 'linear-gradient(135deg, #6366f1 0%, #a855f7 100%)',
+            boxShadow: '0 4px 12px rgba(99,102,241,0.5)',
+          }}
+        >
+          <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
           </svg>
         </div>
-        <span className="text-sm font-semibold text-white">MultiMouse</span>
+        <span className="text-sm font-bold text-white tracking-tight">MultiMouse</span>
       </div>
 
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-0.5">
         <button
           onClick={onSettings}
-          className="w-7 h-7 rounded-lg flex items-center justify-center
-            text-white/40 hover:text-white/80 hover:bg-white/5 transition-all"
+          className="w-8 h-8 rounded-xl flex items-center justify-center
+            text-white/40 hover:text-white hover:bg-white/8 transition-all"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
@@ -36,8 +42,8 @@ export const TitleBar = ({ onSettings }: Props) => {
         </button>
         <button
           onClick={close}
-          className="w-7 h-7 rounded-lg flex items-center justify-center
-            text-white/40 hover:text-white/80 hover:bg-white/5 transition-all"
+          className="w-8 h-8 rounded-xl flex items-center justify-center
+            text-white/40 hover:text-red-400 hover:bg-red-500/10 transition-all"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

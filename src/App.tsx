@@ -91,10 +91,10 @@ export default function App() {
     <div
       className="w-full h-screen flex flex-col overflow-hidden"
       style={{
-        background: 'linear-gradient(160deg, #0d0d1a 0%, #13132a 50%, #0d0d1a 100%)',
-        borderRadius: '16px',
-        border: '1px solid rgba(255,255,255,0.07)',
-        boxShadow: '0 24px 64px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.07)',
+        background: 'linear-gradient(160deg, #0f0c29 0%, #1a0d4a 45%, #0d1535 100%)',
+        borderRadius: '18px',
+        border: '1px solid rgba(99,102,241,0.18)',
+        boxShadow: '0 32px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04) inset, 0 1px 0 rgba(167,139,250,0.12) inset',
       }}
     >
       <TitleBar onSettings={() => setPage(currentPage === 'settings' ? 'home' : 'settings')} />
