@@ -17,6 +17,9 @@ async fn read_line(stream: &mut TcpStream) -> Option<String> {
         if byte[0] != b'\r' {
             buf.push(byte[0]);
         }
+        if buf.len() > 64 {
+            return None;
+        }
     }
     String::from_utf8(buf).ok()
 }
@@ -50,15 +53,22 @@ pub async fn create_session(
         match read_line(&mut stream).await.as_deref() {
             Some("READY") => {
                 tracing::info!("Relay room {} ready, running server", code_clone);
-                let dummy_addr = "0.0.0.0:0".parse().unwrap();
+                let dummy_addr = "0.0.0.0:0".parse().expect("valid addr literal");
                 crate::network::server::handle_relay_stream(stream, dummy_addr, app, state).await;
+            }
+            Some("TIMEOUT") | None => {
+                tracing::warn!("Relay room {} timed out waiting for joiner", code_clone);
+                let _ = app.emit(
+                    "connection-failed",
+                    serde_json::json!({ "error": "Room expired — no one joined in time" }),
+                );
             }
             Some(msg) => {
                 tracing::warn!("Relay unexpected response: {}", msg);
-                let _ = app.emit("relay-timeout", ());
-            }
-            None => {
-                let _ = app.emit("relay-timeout", ());
+                let _ = app.emit(
+                    "connection-failed",
+                    serde_json::json!({ "error": format!("Relay error: {}", msg) }),
+                );
             }
         }
     });
@@ -86,7 +96,7 @@ pub async fn join_session(
     };
 
     if stream
-        .write_all(format!("JOIN {}\n", code.to_uppercase()).as_bytes())
+        .write_all(format!("JOIN {}\n", code.trim().to_uppercase()).as_bytes())
         .await
         .is_err()
     {
@@ -102,6 +112,13 @@ pub async fn join_session(
             );
             return;
         }
+        Some("TIMEOUT") => {
+            let _ = app.emit(
+                "connection-failed",
+                serde_json::json!({ "error": "Room expired" }),
+            );
+            return;
+        }
         _ => {
             let _ = app.emit(
                 "connection-failed",
@@ -111,12 +128,12 @@ pub async fn join_session(
         }
     }
 
-    // Create a placeholder peer for the relay connection
+    // Placeholder peer — name/addr updated after Hello exchange in connect_stream
     let peer = PeerInfo {
-        id: format!("relay-{}", code),
+        id: format!("relay-{}", code.trim().to_uppercase()),
         name: "Internet Device".to_string(),
-        addr: relay_url,
-        port: 57173,
+        addr: String::new(), // relay peer has no direct addr
+        port: 0,
         status: PeerStatus::Available,
         ping_ms: None,
         is_known: false,

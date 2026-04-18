@@ -88,7 +88,121 @@ pub async fn update_settings(
     state: State<'_, Arc<AppState>>,
     settings: Settings,
 ) -> Result<(), String> {
+    let old_startup = state.settings.read().launch_on_startup;
+    let new_startup = settings.launch_on_startup;
+
+    // Persist to disk first
+    storage::save_settings(&settings);
     *state.settings.write() = settings;
+
+    // Apply launch-on-startup change if toggled
+    if new_startup != old_startup {
+        apply_autolaunch(new_startup);
+    }
+
+    Ok(())
+}
+
+fn apply_autolaunch(enable: bool) {
+    if let Ok(exe) = std::env::current_exe() {
+        let exe_str = exe.to_string_lossy().to_string();
+        #[cfg(target_os = "macos")]
+        set_autolaunch_macos(&exe_str, enable);
+        #[cfg(target_os = "windows")]
+        set_autolaunch_windows(&exe_str, enable);
+        #[cfg(target_os = "linux")]
+        set_autolaunch_linux(enable);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_autolaunch_macos(exe: &str, enable: bool) {
+    // Write/remove a launchd plist in ~/Library/LaunchAgents
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return,
+    };
+    let plist_path = home
+        .join("Library/LaunchAgents/com.multimouse.app.plist");
+
+    if enable {
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.multimouse.app</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#,
+            exe = exe
+        );
+        let _ = std::fs::write(&plist_path, plist);
+    } else {
+        let _ = std::fs::remove_file(&plist_path);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_autolaunch_windows(exe: &str, enable: bool) {
+    use std::process::Command;
+    if enable {
+        let _ = Command::new("reg")
+            .args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                   "/v", "MultiMouse", "/t", "REG_SZ", "/d", exe, "/f"])
+            .output();
+    } else {
+        let _ = Command::new("reg")
+            .args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                   "/v", "MultiMouse", "/f"])
+            .output();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_autolaunch_linux(enable: bool) {
+    let config = match dirs::config_dir() {
+        Some(c) => c,
+        None => return,
+    };
+    let autostart_dir = config.join("autostart");
+    let _ = std::fs::create_dir_all(&autostart_dir);
+    let desktop_path = autostart_dir.join("multimouse.desktop");
+
+    if enable {
+        if let Ok(exe) = std::env::current_exe() {
+            let content = format!(
+                "[Desktop Entry]\nType=Application\nName=MultiMouse\nExec={}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
+                exe.display()
+            );
+            let _ = std::fs::write(&desktop_path, content);
+        }
+    } else {
+        let _ = std::fs::remove_file(&desktop_path);
+    }
+}
+
+// ── Pairing accept/reject ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn accept_pairing(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if let Some(tx) = state.pending_pairing.lock().take() {
+        let _ = tx.send(true);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reject_pairing(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if let Some(tx) = state.pending_pairing.lock().take() {
+        let _ = tx.send(false);
+    }
     Ok(())
 }
 
@@ -146,6 +260,11 @@ pub async fn send_files(
             .map(|p| p.addr.clone())
             .ok_or_else(|| "Peer not found".to_string())?
     };
+
+    if peer_addr.is_empty() {
+        return Err("File transfer is not supported over relay connections".to_string());
+    }
+
     let state_arc = state.inner().clone();
     tokio::spawn(async move {
         crate::network::transfer::send_files(app, state_arc, peer_id, peer_addr, paths).await;
@@ -184,6 +303,7 @@ pub async fn get_transfers(
 
 #[tauri::command]
 pub async fn clear_transfers(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Keep only in-progress transfers; remove completed, errored, or rejected ones
     state
         .active_transfers
         .lock()

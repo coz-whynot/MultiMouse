@@ -10,6 +10,7 @@ export const UpdateBanner = () => {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [installing, setInstalling] = useState(false);
   const [dismissed, setDismissed] = useState(false);
+  const [installError, setInstallError] = useState(false);
 
   useEffect(() => {
     checkForUpdate();
@@ -41,6 +42,7 @@ export const UpdateBanner = () => {
     } catch (e) {
       console.error('Update install failed', e);
       setInstalling(false);
+      setInstallError(true);
     }
   };
 
@@ -60,7 +62,10 @@ export const UpdateBanner = () => {
               d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
           </svg>
           <p className="text-[10px] text-accent-300 flex-1 min-w-0">
-            <span className="font-semibold">v{update.version}</span> available
+            {installError
+              ? <span className="text-red-400">Install failed — try again</span>
+              : <><span className="font-semibold">v{update.version}</span> available</>
+            }
           </p>
           <button
             onClick={handleInstall}
@@ -69,7 +74,7 @@ export const UpdateBanner = () => {
               bg-accent-500/20 hover:bg-accent-500/40 rounded-lg px-2 py-1
               transition-all disabled:opacity-50 flex-shrink-0"
           >
-            {installing ? 'Installing…' : 'Update'}
+            {installing ? 'Installing…' : installError ? 'Retry' : 'Update'}
           </button>
           <button
             onClick={() => setDismissed(true)}

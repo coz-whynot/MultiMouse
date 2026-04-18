@@ -32,7 +32,6 @@ pub async fn connect(
 }
 
 /// Run the client protocol on an already-established TcpStream.
-/// Used for both direct connections and relay-proxied connections.
 pub async fn connect_stream(
     app: AppHandle,
     state: Arc<AppState>,
@@ -92,6 +91,7 @@ pub async fn connect_stream(
 
     let (mut reader, mut writer) = stream.into_split();
 
+    // Writer task: drains net_rx and sends messages to remote
     tokio::spawn(async move {
         while let Some(cmd) = net_rx.recv().await {
             let msg = match cmd {
@@ -99,6 +99,7 @@ pub async fn connect_stream(
                 NetCommand::FocusAcquired => Message::FocusAcquired,
                 NetCommand::FocusReleased => Message::FocusReleased,
                 NetCommand::ClipboardText(text) => Message::ClipboardText { text },
+                NetCommand::Ping(ts) => Message::Ping { ts },
                 NetCommand::Disconnect => {
                     let data = serde_json::to_vec(&Message::Bye).unwrap_or_default();
                     let len = data.len() as u32;
@@ -121,22 +122,20 @@ pub async fn connect_stream(
         }
     });
 
-    let mut ping_interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(5));
+    let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
     let state_ping = state.clone();
     let peer_id_ping = peer.id.clone();
 
     loop {
         tokio::select! {
             _ = ping_interval.tick() => {
+                // Stop pinging if disconnected
+                if state_ping.net_tx.lock().is_none() { break; }
                 let ts = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                if state_ping.net_tx.lock().is_none() { break; }
-                // Re-use net_tx channel – Ping is a direct message type not a NetCommand,
-                // so we stored the send time; Pong below computes RTT.
-                let _ = ts;
+                state_ping.send_net(NetCommand::Ping(ts));
             }
             result = async {
                 let mut len_buf = [0u8; 4];

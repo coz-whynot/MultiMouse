@@ -21,6 +21,8 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -121,6 +123,8 @@ pub fn run() {
             commands::forget_device,
             commands::create_internet_session,
             commands::join_internet_session,
+            commands::accept_pairing,
+            commands::reject_pairing,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MultiMouse");

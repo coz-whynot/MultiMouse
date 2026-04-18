@@ -16,13 +16,11 @@ pub enum Message {
     PinRequest {
         pin: String,
     },
-    /// After first pairing, reconnect using stored session key (skips PIN)
     SessionAuth {
         key: String,
     },
     PinResponse {
         accepted: bool,
-        /// Server sends back a session key on successful auth, for future reconnects
         session_key: Option<String>,
     },
     FocusAcquired,
@@ -95,6 +93,7 @@ pub enum NetCommand {
     FocusAcquired,
     FocusReleased,
     ClipboardText(String),
+    Ping(u64),
     Disconnect,
 }
 
@@ -129,7 +128,7 @@ pub async fn read_transfer_msg(stream: &mut tokio::net::TcpStream) -> Option<Tra
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.ok()?;
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len > 256 * 1024 { // 256 KB per message max
+    if len > 256 * 1024 {
         return None;
     }
     let mut buf = vec![0u8; len];

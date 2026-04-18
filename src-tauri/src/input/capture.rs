@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Instant;
 use rdev::{Event, EventType};
@@ -7,6 +8,8 @@ use crate::network::protocol::{InputEvent, NetCommand};
 use crate::screen::layout;
 
 const DOUBLE_CTRL_MS: u128 = 400;
+/// Throttle mouse-move to ~120 Hz max (8 ms between sends)
+const MOUSE_MOVE_INTERVAL_MS: u128 = 8;
 
 pub fn start(app: AppHandle, state: Arc<AppState>) {
     let state_grab = state.clone();
@@ -41,14 +44,14 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 state.set_relaying(false);
                 *last = None;
                 state.send_net(NetCommand::FocusReleased);
-                sync_clipboard_to_remote(state);
+                sync_clipboard_async(state);
                 let _ = app.emit("focus-released", ());
                 tracing::info!("Relay released via double-Ctrl");
                 return None;
             }
         }
 
-        if let Some(ev) = convert_event(&event.event_type) {
+        if let Some(ev) = convert_event_throttled(&event.event_type) {
             state.send_net(NetCommand::Input(ev));
         }
         None
@@ -65,7 +68,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
             {
                 state.set_relaying(true);
                 state.send_net(NetCommand::FocusAcquired);
-                sync_clipboard_to_remote(state);
+                sync_clipboard_async(state);
                 let _ = app.emit("focus-acquired", ());
                 tracing::debug!("Relay ON — cursor at {} edge ({x:.0}, {y:.0})", edge);
             }
@@ -77,7 +80,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
 
 fn handle_listen(event: &Event, state: &AppState) {
     if state.is_relaying() {
-        if let Some(ev) = convert_event(&event.event_type) {
+        if let Some(ev) = convert_event_throttled(&event.event_type) {
             state.send_net(NetCommand::Input(ev));
         }
     } else if let EventType::MouseMove { x, y } = event.event_type {
@@ -90,11 +93,31 @@ fn handle_listen(event: &Event, state: &AppState) {
     }
 }
 
-fn sync_clipboard_to_remote(state: &AppState) {
-    if let Ok(mut ctx) = arboard::Clipboard::new() {
-        if let Ok(text) = ctx.get_text() {
-            state.send_net(NetCommand::ClipboardText(text));
+/// Convert and throttle mouse moves; all other events pass through immediately.
+fn convert_event_throttled(event_type: &EventType) -> Option<InputEvent> {
+    match event_type {
+        EventType::MouseMove { x, y } => {
+            thread_local! {
+                static LAST_MOVE: Cell<Option<Instant>> = Cell::new(None);
+            }
+            let now = Instant::now();
+            let should_send = LAST_MOVE.with(|last| {
+                let ok = last
+                    .get()
+                    .map(|t| now.duration_since(t).as_millis() >= MOUSE_MOVE_INTERVAL_MS)
+                    .unwrap_or(true);
+                if ok {
+                    last.set(Some(now));
+                }
+                ok
+            });
+            if should_send {
+                Some(InputEvent::MouseMove { x: *x, y: *y })
+            } else {
+                None
+            }
         }
+        other => convert_event(other),
     }
 }
 
@@ -121,6 +144,20 @@ fn convert_event(event_type: &EventType) -> Option<InputEvent> {
             dx: *delta_x,
             dy: *delta_y,
         }),
+    }
+}
+
+/// Sync clipboard to remote in a background OS thread (never blocks the input capture thread).
+fn sync_clipboard_async(state: &AppState) {
+    let tx = state.net_tx.lock().clone();
+    if let Some(tx) = tx {
+        std::thread::spawn(move || {
+            if let Ok(mut ctx) = arboard::Clipboard::new() {
+                if let Ok(text) = ctx.get_text() {
+                    let _ = tx.try_send(NetCommand::ClipboardText(text));
+                }
+            }
+        });
     }
 }
 

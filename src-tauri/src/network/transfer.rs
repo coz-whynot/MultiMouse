@@ -98,9 +98,11 @@ async fn handle_incoming(
         }),
     );
 
+    // Fixed: properly handle timeout without double-unwrap panic
     let accepted = tokio::time::timeout(tokio::time::Duration::from_secs(60), rx)
         .await
-        .unwrap_or(Ok(false))
+        .ok()
+        .and_then(|r| r.ok())
         .unwrap_or(false);
 
     state.pending_offers.lock().remove(&transfer_id);
@@ -124,12 +126,13 @@ async fn handle_incoming(
     }
     set_status(&state, &transfer_id, "active");
 
-    // Create destination file
-    let dest = unique_path(
-        dirs::download_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(&file_name),
-    );
+    // Create destination file — prefer Downloads, fall back to Desktop, then home
+    let download_dir = dirs::download_dir()
+        .or_else(dirs::desktop_dir)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let dest = unique_path(download_dir.join(&file_name));
 
     let mut file = match tokio::fs::File::create(&dest).await {
         Ok(f) => f,
@@ -196,6 +199,11 @@ pub async fn send_files(
     peer_addr: String,
     paths: Vec<String>,
 ) {
+    if peer_addr.is_empty() {
+        let _ = app.emit("transfer-error", "File transfer is not supported over relay connections");
+        return;
+    }
+
     let session_key = match storage::get_session_key(&peer_id) {
         Some(k) => k,
         None => {

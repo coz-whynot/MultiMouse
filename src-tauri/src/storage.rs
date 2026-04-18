@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use crate::state::Settings;
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Config {
     pub known_devices: Vec<KnownDevice>,
+    pub settings: Option<Settings>,
+    pub device_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -38,6 +41,27 @@ pub fn save(config: &Config) {
             let _ = std::fs::write(path, json);
         }
     }
+}
+
+pub fn get_or_create_device_id() -> String {
+    let mut config = load();
+    if let Some(id) = &config.device_id {
+        return id.clone();
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    config.device_id = Some(id.clone());
+    save(&config);
+    id
+}
+
+pub fn load_settings() -> Settings {
+    load().settings.unwrap_or_default()
+}
+
+pub fn save_settings(settings: &Settings) {
+    let mut config = load();
+    config.settings = Some(settings.clone());
+    save(&config);
 }
 
 pub fn save_device(id: &str, name: &str, addr: &str, port: u16, session_key: &str) {

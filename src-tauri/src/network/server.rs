@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tauri::{AppHandle, Emitter};
 use rand::Rng;
 
@@ -8,7 +9,6 @@ use crate::state::{AppState, PeerStatus};
 use crate::network::protocol::{
     Message, MULTIMOUSE_PORT, read_message, send_message,
 };
-use crate::crypto::pairing;
 use crate::input::inject;
 use crate::storage;
 
@@ -38,7 +38,7 @@ pub async fn start_server(app: AppHandle, state: Arc<AppState>) {
     }
 }
 
-/// Entry point for relay-proxied connections (peer_addr is unknown).
+/// Entry point for relay-proxied connections (peer_addr may be dummy 0.0.0.0:0).
 pub async fn handle_relay_stream(
     stream: tokio::net::TcpStream,
     peer_addr: SocketAddr,
@@ -80,27 +80,35 @@ pub async fn handle_controller(
             let ok = storage::get_session_key(&peer_id).as_deref() == Some(&key);
             (ok, None)
         }
-        Message::PinRequest { pin: entered } => {
-            let pin = pairing::generate_pin();
-            *state.pending_pin.lock() = Some((peer_id.clone(), pin.clone()));
+        Message::PinRequest { .. } => {
+            // Ask the user on this device to accept or reject the connection.
+            // No PIN comparison — user explicitly accepts/rejects.
+            let (tx, rx) = oneshot::channel::<bool>();
+            *state.pending_pairing.lock() = Some(tx);
 
             let _ = app.emit(
                 "pairing-request",
                 serde_json::json!({
                     "peer_id": peer_id,
                     "peer_name": peer_name,
-                    "pin": pin,
+                    "pin": "",
                 }),
             );
 
-            let ok = {
-                let guard = state.pending_pin.lock();
-                guard.as_ref().map(|(_, p)| p == &entered).unwrap_or(false)
-            };
-            *state.pending_pin.lock() = None;
+            // Wait up to 60 seconds for user to accept/reject
+            let accepted = tokio::time::timeout(
+                tokio::time::Duration::from_secs(60),
+                rx,
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false);
 
-            let key = if ok { Some(generate_session_key()) } else { None };
-            (ok, key)
+            *state.pending_pairing.lock() = None;
+
+            let key = if accepted { Some(generate_session_key()) } else { None };
+            (accepted, key)
         }
         _ => (false, None),
     };

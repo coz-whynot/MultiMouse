@@ -39,6 +39,10 @@ fn inject(enigo: &mut Enigo, event: InputEvent) {
                 0 => Button::Left,
                 1 => Button::Right,
                 2 => Button::Middle,
+                #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+                3 => Button::Back,
+                #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+                4 => Button::Forward,
                 _ => return,
             };
             let dir = if pressed { Direction::Press } else { Direction::Release };
@@ -63,6 +67,7 @@ fn inject(enigo: &mut Enigo, event: InputEvent) {
 
 fn rdev_key_to_enigo(key_str: &str) -> Option<Key> {
     Some(match key_str {
+        // Letters
         "KeyA" => Key::Unicode('a'),
         "KeyB" => Key::Unicode('b'),
         "KeyC" => Key::Unicode('c'),
@@ -89,6 +94,7 @@ fn rdev_key_to_enigo(key_str: &str) -> Option<Key> {
         "KeyX" => Key::Unicode('x'),
         "KeyY" => Key::Unicode('y'),
         "KeyZ" => Key::Unicode('z'),
+        // Numbers row
         "Num0" => Key::Unicode('0'),
         "Num1" => Key::Unicode('1'),
         "Num2" => Key::Unicode('2'),
@@ -99,24 +105,63 @@ fn rdev_key_to_enigo(key_str: &str) -> Option<Key> {
         "Num7" => Key::Unicode('7'),
         "Num8" => Key::Unicode('8'),
         "Num9" => Key::Unicode('9'),
+        // Numpad
+        "Kp0" => Key::Unicode('0'),
+        "Kp1" => Key::Unicode('1'),
+        "Kp2" => Key::Unicode('2'),
+        "Kp3" => Key::Unicode('3'),
+        "Kp4" => Key::Unicode('4'),
+        "Kp5" => Key::Unicode('5'),
+        "Kp6" => Key::Unicode('6'),
+        "Kp7" => Key::Unicode('7'),
+        "Kp8" => Key::Unicode('8'),
+        "Kp9" => Key::Unicode('9'),
+        "KpMinus" => Key::Unicode('-'),
+        "KpPlus" => Key::Unicode('+'),
+        "KpMultiply" => Key::Unicode('*'),
+        "KpDivide" => Key::Unicode('/'),
+        "KpDecimal" => Key::Unicode('.'),
+        "KpReturn" => Key::Return,
+        // Punctuation & symbols
+        "Minus" => Key::Unicode('-'),
+        "Equal" => Key::Unicode('='),
+        "LeftBracket" => Key::Unicode('['),
+        "RightBracket" => Key::Unicode(']'),
+        "BackSlash" => Key::Unicode('\\'),
+        "SemiColon" => Key::Unicode(';'),
+        "Quote" => Key::Unicode('\''),
+        "BackQuote" => Key::Unicode('`'),
+        "Comma" => Key::Unicode(','),
+        "Dot" => Key::Unicode('.'),
+        "Slash" => Key::Unicode('/'),
+        // Control keys
         "Return" => Key::Return,
         "Escape" => Key::Escape,
         "BackSpace" => Key::Backspace,
         "Tab" => Key::Tab,
         "Space" => Key::Space,
-        "ShiftLeft" | "ShiftRight" => Key::Shift,
-        "ControlLeft" | "ControlRight" => Key::Control,
-        "MetaLeft" | "MetaRight" => Key::Meta,
-        "Alt" | "AltGr" => Key::Alt,
-        "UpArrow" => Key::UpArrow,
-        "DownArrow" => Key::DownArrow,
-        "LeftArrow" => Key::LeftArrow,
-        "RightArrow" => Key::RightArrow,
+        "CapsLock" => Key::CapsLock,
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+        "Insert" => Key::Insert,
         "Delete" => Key::Delete,
         "Home" => Key::Home,
         "End" => Key::End,
         "PageUp" => Key::PageUp,
         "PageDown" => Key::PageDown,
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+        "PrintScreen" => Key::Print,
+        #[cfg(all(unix, not(target_os = "macos")))]
+        "ScrollLock" => Key::ScrollLock,
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+        "Pause" => Key::Pause,
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
+        "NumLock" => Key::Numlock,
+        // Modifiers
+        "ShiftLeft" | "ShiftRight" => Key::Shift,
+        "ControlLeft" | "ControlRight" => Key::Control,
+        "MetaLeft" | "MetaRight" => Key::Meta,
+        "Alt" | "AltGr" => Key::Alt,
+        // Function keys
         "F1" => Key::F1,
         "F2" => Key::F2,
         "F3" => Key::F3,
@@ -129,6 +174,19 @@ fn rdev_key_to_enigo(key_str: &str) -> Option<Key> {
         "F10" => Key::F10,
         "F11" => Key::F11,
         "F12" => Key::F12,
+        "F13" => Key::F13,
+        "F14" => Key::F14,
+        "F15" => Key::F15,
+        "F16" => Key::F16,
+        "F17" => Key::F17,
+        "F18" => Key::F18,
+        "F19" => Key::F19,
+        "F20" => Key::F20,
+        // Arrow keys
+        "UpArrow" => Key::UpArrow,
+        "DownArrow" => Key::DownArrow,
+        "LeftArrow" => Key::LeftArrow,
+        "RightArrow" => Key::RightArrow,
         _ => return None,
     })
 }
