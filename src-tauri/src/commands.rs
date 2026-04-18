@@ -35,6 +35,7 @@ pub async fn get_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::V
         "device_name": state.device_name,
         "connected_peer": *state.connected_peer.lock(),
         "relaying": state.is_relaying(),
+        "is_controlled": state.is_controlled(),
     }))
 }
 
@@ -74,6 +75,17 @@ pub async fn release_cursor(state: State<'_, Arc<AppState>>) -> Result<(), Strin
     state.set_relaying(false);
     state.send_net(NetCommand::FocusReleased);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn take_control(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if state.connected_peer.lock().is_some() {
+        state.set_relaying(true);
+        state.send_net(NetCommand::FocusAcquired);
+        Ok(())
+    } else {
+        Err("Not connected to any device".to_string())
+    }
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────

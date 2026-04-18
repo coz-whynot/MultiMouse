@@ -13,6 +13,7 @@ export interface AppStatus {
   device_name: string;
   connected_peer: string | null;
   relaying: boolean;
+  is_controlled: boolean;
 }
 
 export interface Settings {

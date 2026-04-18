@@ -155,9 +155,11 @@ pub async fn handle_controller(
                 inject::process_event(event);
             }
             Some(Message::FocusAcquired) => {
+                state.set_controlled(true);
                 let _ = app.emit("focus-acquired", ());
             }
             Some(Message::FocusReleased) => {
+                state.set_controlled(false);
                 let _ = app.emit("focus-released", ());
             }
             Some(Message::ClipboardText { text }) => {
@@ -196,5 +198,6 @@ async fn cleanup(app: &AppHandle, state: &AppState, peer_id: &str) {
     }
     *state.connected_peer.lock() = None;
     state.set_relaying(false);
+    state.set_controlled(false);
     let _ = app.emit("disconnected", ());
 }

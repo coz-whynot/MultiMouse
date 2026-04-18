@@ -99,7 +99,7 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-sm" style={{ color: 'rgba(255,255,255,0.48)' }}>
-            {isConnected ? 'Connected' : peer.status === 'pairing' ? 'Pairing…' : peer.status === 'error' ? 'Error' : 'Tap to connect'}
+            {isConnected ? 'Connected' : peer.status === 'pairing' ? 'Awaiting approval…' : peer.status === 'error' ? 'Error' : 'Tap to connect'}
           </span>
           <PingBadge ms={peer.ping_ms} />
         </div>

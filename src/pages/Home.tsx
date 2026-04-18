@@ -4,7 +4,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useStore } from '../store/useStore';
 import { DeviceCard } from '../components/DeviceCard';
-import { PinEntry } from '../components/PinModal';
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { InternetModal } from '../components/InternetModal';
 
@@ -36,30 +35,23 @@ export const Home = () => {
   const isEmpty = peers.length === 0;
 
   useEffect(() => {
-    const unsub = listen('accessibility-needed', () => setAccessibilityNeeded(true));
-    return () => { unsub.then((fn) => fn()); };
+    const unsubs = Promise.all([
+      listen('accessibility-needed', () => setAccessibilityNeeded(true)),
+      listen('connected', () => setConnectingTo(null)),
+      listen('pin-rejected', () => setConnectingTo(null)),
+      listen('connection-failed', () => setConnectingTo(null)),
+      listen('disconnected', () => setConnectingTo(null)),
+    ]);
+    return () => { unsubs.then((fns) => fns.forEach((fn) => fn())); };
   }, []);
 
   const handleConnect = async (peerId: string) => {
-    const peer = peers.find((p) => p.id === peerId);
-    if (peer?.is_known) {
-      try {
-        await invoke('connect_to_device', { peerId, pin: '' });
-      } catch (e) {
-        console.error(e);
-      }
-    } else {
-      setConnectingTo(peerId);
-    }
-  };
-
-  const handlePinSubmit = async (pin: string) => {
-    if (!connectingTo) return;
+    setConnectingTo(peerId);
     try {
-      await invoke('connect_to_device', { peerId: connectingTo, pin });
+      // Send connection request — the other device will accept or reject it
+      await invoke('connect_to_device', { peerId, pin: '' });
     } catch (e) {
       console.error(e);
-    } finally {
       setConnectingTo(null);
     }
   };
@@ -250,23 +242,43 @@ export const Home = () => {
         </div>
       </div>
 
-      {/* Footer */}
-      <div className="px-4 py-3 flex items-center justify-between flex-shrink-0"
-        style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-        <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full" style={{ background: '#10b981' }} />
-          <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>{deviceName}</span>
-        </div>
-        <span className="text-xs" style={{ color: 'rgba(255,255,255,0.18)' }}>v0.1.0</span>
-      </div>
-
       <AnimatePresence>
-        {connectingTo && (
-          <PinEntry
-            peerName={peers.find((p) => p.id === connectingTo)?.name ?? 'Device'}
-            onSubmit={handlePinSubmit}
-            onCancel={() => setConnectingTo(null)}
-          />
+        {connectingTo && !peers.find(p => p.id === connectingTo && p.status === 'connected') && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 flex items-center justify-center z-50"
+            style={{ background: 'rgba(8,8,18,0.85)', backdropFilter: 'blur(12px)' }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="w-72 rounded-3xl p-6 border border-white/10 flex flex-col items-center gap-4"
+              style={{ background: 'rgba(19,19,42,0.95)' }}
+            >
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ repeat: Infinity, duration: 1.2, ease: 'linear' }}
+                className="w-12 h-12 rounded-full border-2 border-accent-500/30 border-t-accent-400"
+              />
+              <div className="text-center">
+                <p className="text-white font-semibold">
+                  {peers.find(p => p.id === connectingTo)?.name ?? 'Device'}
+                </p>
+                <p className="text-white/50 text-sm mt-1">
+                  Waiting for them to accept…
+                </p>
+              </div>
+              <button
+                onClick={() => { invoke('disconnect'); setConnectingTo(null); }}
+                className="text-sm text-white/40 hover:text-white/70 transition-colors"
+              >
+                Cancel
+              </button>
+            </motion.div>
+          </motion.div>
         )}
         {showInternet && (
           <InternetModal onClose={() => setShowInternet(false)} />

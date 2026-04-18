@@ -76,6 +76,7 @@ pub struct AppState {
     pub peers: Mutex<Vec<PeerInfo>>,
     pub connected_peer: Mutex<Option<String>>,
     pub relay_active: AtomicBool,
+    pub is_controlled: AtomicBool,
     pub settings: RwLock<Settings>,
     pub net_tx: Mutex<Option<mpsc::Sender<NetCommand>>>,
     pub last_ctrl_press: Mutex<Option<Instant>>,
@@ -100,6 +101,7 @@ impl AppState {
             peers: Mutex::new(Vec::new()),
             connected_peer: Mutex::new(None),
             relay_active: AtomicBool::new(false),
+            is_controlled: AtomicBool::new(false),
             settings: RwLock::new(settings),
             net_tx: Mutex::new(None),
             last_ctrl_press: Mutex::new(None),
@@ -116,6 +118,14 @@ impl AppState {
 
     pub fn set_relaying(&self, active: bool) {
         self.relay_active.store(active, Ordering::SeqCst);
+    }
+
+    pub fn is_controlled(&self) -> bool {
+        self.is_controlled.load(Ordering::SeqCst)
+    }
+
+    pub fn set_controlled(&self, active: bool) {
+        self.is_controlled.store(active, Ordering::SeqCst);
     }
 
     pub fn send_net(&self, cmd: NetCommand) {

@@ -7,7 +7,9 @@ import { TitleBar } from './components/TitleBar';
 import { PinDisplay } from './components/PinModal';
 import { TransferPanel } from './components/TransferProgress';
 import { UpdateBanner } from './components/UpdateBanner';
+import { BottomNav } from './components/BottomNav';
 import { Home } from './pages/Home';
+import { Layout } from './pages/Layout';
 import { SettingsPage } from './pages/Settings';
 import { PairingRequest, FileOffer, TransferInfo } from './types';
 
@@ -18,6 +20,7 @@ export default function App() {
     setPeers,
     setStatus,
     setSettings,
+    status,
     pairingRequest,
     setPairingRequest,
     setTransfers,
@@ -25,6 +28,7 @@ export default function App() {
   } = useStore();
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [draggingFiles, setDraggingFiles] = useState(false);
 
   const refresh = async () => {
     try {
@@ -53,24 +57,25 @@ export default function App() {
       listen<PairingRequest>('pairing-request', (e) => setPairingRequest(e.payload)),
       listen('pin-rejected', () => {
         setPairingRequest(null);
-        setErrorMsg('Connection rejected or timed out. Please try again.');
+        setErrorMsg('Connection rejected or timed out.');
       }),
       listen<{ error: string }>('connection-failed', (e) => {
         setErrorMsg(e.payload?.error ?? 'Connection failed');
       }),
 
-      // File transfer events
+      // File transfer
       listen<TransferInfo[]>('transfer-update', (e) => setTransfers(e.payload)),
       listen<FileOffer>('file-offer', (e) => setFileOffer(e.payload)),
-      listen('transfer-complete', (e: any) => {
-        const { name } = e.payload ?? {};
-        if (name) {
-          // Briefly show completion — store already updated via transfer-update
-        }
-      }),
+      listen('transfer-complete', () => {}),
 
-      // File drop — send to connected peer if any
+      // File drag tracking
+      listen('tauri://drag', () => setDraggingFiles(true)),
+      listen('tauri://drag-leave', () => setDraggingFiles(false)),
+      listen('tauri://drag-cancelled', () => setDraggingFiles(false)),
+
+      // File drop — send to connected peer
       listen('tauri://drag-drop', async (e: any) => {
+        setDraggingFiles(false);
         const paths: string[] = e.payload?.paths ?? [];
         if (!paths.length) return;
         const store = useStore.getState();
@@ -92,6 +97,8 @@ export default function App() {
     };
   }, []);
 
+  const connectedPeer = status?.connected_peer != null;
+
   return (
     <div
       className="w-full h-screen flex flex-col overflow-hidden"
@@ -102,7 +109,7 @@ export default function App() {
         boxShadow: '0 32px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04) inset, 0 1px 0 rgba(167,139,250,0.12) inset',
       }}
     >
-      <TitleBar onSettings={() => setPage(currentPage === 'settings' ? 'home' : 'settings')} />
+      <TitleBar />
 
       <UpdateBanner />
 
@@ -129,34 +136,59 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
       <TransferPanel />
 
+      {/* File drag overlay */}
+      <AnimatePresence>
+        {draggingFiles && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none"
+            style={{ borderRadius: '18px', background: 'rgba(99,102,241,0.18)', backdropFilter: 'blur(2px)', border: '2px dashed rgba(99,102,241,0.6)' }}
+          >
+            <div className="flex flex-col items-center gap-3">
+              <motion.div animate={{ y: [0, -8, 0] }} transition={{ repeat: Infinity, duration: 1.2 }}>
+                <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="rgba(167,139,250,0.9)" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+              </motion.div>
+              <p className="text-base font-bold text-white/80">
+                {connectedPeer ? 'Drop to send file' : 'No device connected'}
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Page content */}
       <AnimatePresence mode="wait">
         {currentPage === 'home' && (
-          <motion.div
-            key="home"
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 10 }}
-            transition={{ duration: 0.15 }}
-            className="flex flex-col flex-1 overflow-hidden"
-          >
+          <motion.div key="home" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 10 }} transition={{ duration: 0.15 }}
+            className="flex flex-col flex-1 overflow-hidden">
             <Home />
           </motion.div>
         )}
+        {currentPage === 'layout' && (
+          <motion.div key="layout" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.15 }}
+            className="flex flex-col flex-1 overflow-hidden">
+            <Layout />
+          </motion.div>
+        )}
         {currentPage === 'settings' && (
-          <motion.div
-            key="settings"
-            initial={{ opacity: 0, x: 10 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -10 }}
-            transition={{ duration: 0.15 }}
-            className="flex flex-col flex-1 overflow-hidden"
-          >
+          <motion.div key="settings" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -10 }} transition={{ duration: 0.15 }}
+            className="flex flex-col flex-1 overflow-hidden">
             <SettingsPage />
           </motion.div>
         )}
       </AnimatePresence>
+
+      <BottomNav current={currentPage as any} onChange={setPage as any} connectedPeer={connectedPeer} />
 
       <AnimatePresence>
         {pairingRequest && (

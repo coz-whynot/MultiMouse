@@ -111,6 +111,7 @@ pub fn run() {
             commands::connect_to_device,
             commands::disconnect,
             commands::release_cursor,
+            commands::take_control,
             commands::get_settings,
             commands::update_settings,
             commands::get_monitors,
