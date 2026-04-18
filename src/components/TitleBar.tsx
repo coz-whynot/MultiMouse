@@ -1,7 +1,10 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useStore } from '../store/useStore';
 
 export const TitleBar = () => {
   const close = () => getCurrentWindow().hide();
+  const theme = useStore((s) => (s.settings?.theme === 'light' ? 'light' : 'dark'));
+  const isLight = theme === 'light';
 
   return (
     <div
@@ -21,14 +24,31 @@ export const TitleBar = () => {
               d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
           </svg>
         </div>
-        <span className="text-sm font-bold text-white tracking-tight">MultiMouse</span>
+        <span
+          className="text-sm font-bold tracking-tight"
+          style={{ color: isLight ? '#1e1b4b' : '#ffffff' }}
+        >
+          MultiMouse
+        </span>
       </div>
 
       <div className="flex items-center gap-0.5">
         <button
           onClick={close}
-          className="w-8 h-8 rounded-xl flex items-center justify-center
-            text-white/40 hover:text-red-400 hover:bg-red-500/10 transition-all"
+          className="w-8 h-8 rounded-xl flex items-center justify-center transition-all"
+          style={{
+            color: isLight ? 'rgba(30,27,75,0.5)' : 'rgba(255,255,255,0.4)',
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = '#ef4444';
+            (e.currentTarget as HTMLButtonElement).style.background = 'rgba(239,68,68,0.12)';
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = isLight
+              ? 'rgba(30,27,75,0.5)'
+              : 'rgba(255,255,255,0.4)';
+            (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+          }}
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

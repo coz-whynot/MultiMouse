@@ -1,13 +1,20 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tauri::{AppHandle, Emitter};
 
 use crate::state::{AppState, PeerInfo, PeerStatus};
-use crate::network::protocol::{Message, NetCommand, read_message, send_message};
+use crate::network::protocol::{Message, NetCommand, read_enc_message, send_enc_message};
+use crate::crypto::encryption;
 use crate::storage;
+
+fn reset_peer_status(state: &AppState, peer_id: &str) {
+    let mut peers = state.peers.lock();
+    if let Some(p) = peers.iter_mut().find(|p| p.id == peer_id) {
+        p.status = PeerStatus::Available;
+    }
+}
 
 pub async fn connect(
     app: AppHandle,
@@ -17,13 +24,25 @@ pub async fn connect(
     session_key: Option<String>,
 ) {
     let addr = format!("{}:{}", peer.addr, peer.port);
-    let stream = match TcpStream::connect(&addr).await {
-        Ok(s) => s,
-        Err(e) => {
+    let stream = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        TcpStream::connect(&addr),
+    ).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             tracing::error!("Connect to {} failed: {}", addr, e);
+            reset_peer_status(&state, &peer.id);
             let _ = app.emit(
                 "connection-failed",
                 serde_json::json!({ "peer_id": peer.id, "error": e.to_string() }),
+            );
+            return;
+        }
+        Err(_) => {
+            reset_peer_status(&state, &peer.id);
+            let _ = app.emit(
+                "connection-failed",
+                serde_json::json!({ "peer_id": peer.id, "error": "Connection timed out" }),
             );
             return;
         }
@@ -40,42 +59,83 @@ pub async fn connect_stream(
     pin: String,
     session_key: Option<String>,
 ) {
-    send_message(
+    // Perform encryption handshake before any protocol messages
+    let hs = match encryption::client_handshake(&mut stream).await {
+        Some(h) => h,
+        None => {
+            reset_peer_status(&state, &peer.id);
+            let _ = app.emit(
+                "connection-failed",
+                serde_json::json!({ "peer_id": peer.id, "error": "Encryption handshake failed" }),
+            );
+            return;
+        }
+    };
+    let (mut send_enc, recv_enc, sas_pin) = (hs.send, hs.recv, hs.sas);
+
+    send_enc_message(
         &mut stream,
         &Message::Hello {
             device_id: state.device_id.clone(),
             device_name: state.device_name.clone(),
-            version: 1,
+            version: crate::network::protocol::PROTOCOL_VERSION,
         },
+        &mut send_enc,
     )
     .await;
 
     if let Some(key) = session_key {
-        send_message(&mut stream, &Message::SessionAuth { key }).await;
-        match read_message(&mut stream).await {
+        send_enc_message(&mut stream, &Message::SessionAuth { key }, &mut send_enc).await;
+        match read_enc_message(&mut stream, &recv_enc).await {
             Some(Message::PinResponse { accepted: true, .. }) => {}
             _ => {
+                reset_peer_status(&state, &peer.id);
                 let _ = app.emit("pin-rejected", &peer.id);
                 return;
             }
         }
     } else {
-        send_message(&mut stream, &Message::PinRequest { pin }).await;
-        match read_message(&mut stream).await {
+        // Show our handshake-derived PIN immediately so the user can visually verify
+        // it matches the PIN on the receiver. If a MitM is active, the two SAS values
+        // will differ because each side has a different shared secret.
+        let _ = app.emit(
+            "pin-shown",
+            serde_json::json!({ "peer_id": peer.id, "pin": sas_pin }),
+        );
+
+        send_enc_message(&mut stream, &Message::PinRequest { pin }, &mut send_enc).await;
+
+        match read_enc_message(&mut stream, &recv_enc).await {
             Some(Message::PinResponse { accepted: true, session_key }) => {
                 if let Some(key) = session_key {
-                    storage::save_device(&peer.id, &peer.name, &peer.addr, peer.port, &key);
+                    // Skip persistence for relay peers (empty addr) — they require a fresh code each session
+                    if !peer.addr.is_empty() {
+                        storage::save_device(&peer.id, &peer.name, &peer.addr, peer.port, &key);
+                    }
                 }
             }
             _ => {
+                reset_peer_status(&state, &peer.id);
                 let _ = app.emit("pin-rejected", &peer.id);
                 return;
             }
         }
     }
 
-    // Read server's screen size
-    let _ = read_message(&mut stream).await;
+    // Read server's screen size and store it for coordinate normalization
+    if let Some(Message::ScreenSize { width, height }) = read_enc_message(&mut stream, &recv_enc).await {
+        *state.remote_screen.lock() = Some((width, height));
+    }
+
+    // Send our own screen size so the server can scale incoming mouse coordinates
+    // to its local coordinate space (fixes cursor-jump on mixed-DPI setups).
+    let (cw, ch) = rdev::display_size().unwrap_or((1920, 1080));
+    send_enc_message(
+        &mut stream,
+        &Message::ScreenSize { width: cw as f64, height: ch as f64 },
+        &mut send_enc,
+    )
+    .await;
 
     {
         let mut peers = state.peers.lock();
@@ -84,6 +144,8 @@ pub async fn connect_stream(
         }
     }
     *state.connected_peer.lock() = Some(peer.id.clone());
+    state.reset_disconnect_flag();
+    *state.last_peer_info.lock() = Some(peer.clone());
     let _ = app.emit("connected", &peer.id);
 
     let (net_tx, mut net_rx) = mpsc::channel::<NetCommand>(512);
@@ -91,32 +153,24 @@ pub async fn connect_stream(
 
     let (mut reader, mut writer) = stream.into_split();
 
-    // Writer task: drains net_rx and sends messages to remote
+    // Writer task: drains net_rx and sends encrypted messages to remote
     tokio::spawn(async move {
         while let Some(cmd) = net_rx.recv().await {
+            if matches!(cmd, NetCommand::Disconnect) {
+                send_enc_message(&mut writer, &Message::Bye, &mut send_enc).await;
+                break;
+            }
             let msg = match cmd {
                 NetCommand::Input(ev) => Message::Input(ev),
                 NetCommand::FocusAcquired => Message::FocusAcquired,
                 NetCommand::FocusReleased => Message::FocusReleased,
                 NetCommand::ClipboardText(text) => Message::ClipboardText { text },
+                NetCommand::ClipboardImage { width, height, bytes } =>
+                    Message::ClipboardImage { width, height, bytes },
                 NetCommand::Ping(ts) => Message::Ping { ts },
-                NetCommand::Disconnect => {
-                    let data = serde_json::to_vec(&Message::Bye).unwrap_or_default();
-                    let len = data.len() as u32;
-                    let _ = writer.write_all(&len.to_be_bytes()).await;
-                    let _ = writer.write_all(&data).await;
-                    break;
-                }
+                NetCommand::Disconnect => unreachable!(),
             };
-            let data = match serde_json::to_vec(&msg) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let len = data.len() as u32;
-            if writer.write_all(&len.to_be_bytes()).await.is_err() {
-                break;
-            }
-            if writer.write_all(&data).await.is_err() {
+            if !send_enc_message(&mut writer, &msg, &mut send_enc).await {
                 break;
             }
         }
@@ -137,21 +191,10 @@ pub async fn connect_stream(
                     .as_millis() as u64;
                 state_ping.send_net(NetCommand::Ping(ts));
             }
-            result = async {
-                let mut len_buf = [0u8; 4];
-                reader.read_exact(&mut len_buf).await.map(|_| {
-                    u32::from_be_bytes(len_buf) as usize
-                })
-            } => {
-                let len = match result {
-                    Ok(l) if l <= 10 * 1024 * 1024 => l,
-                    _ => break,
-                };
-                let mut buf = vec![0u8; len];
-                if reader.read_exact(&mut buf).await.is_err() { break; }
-                match serde_json::from_slice::<Message>(&buf) {
-                    Ok(Message::Bye) => break,
-                    Ok(Message::Pong { ts }) => {
+            result = read_enc_message(&mut reader, &recv_enc) => {
+                match result {
+                    Some(Message::Bye) => break,
+                    Some(Message::Pong { ts }) => {
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
@@ -162,6 +205,7 @@ pub async fn connect_stream(
                             p.ping_ms = Some(rtt_ms);
                         }
                     }
+                    None => break,
                     _ => {}
                 }
             }
@@ -176,6 +220,70 @@ pub async fn connect_stream(
     }
     *state.connected_peer.lock() = None;
     *state.net_tx.lock() = None;
+    *state.remote_screen.lock() = None;
+    *state.relay_entry.lock() = None;
     state.set_relaying(false);
     let _ = app.emit("disconnected", ());
+
+    // Auto-reconnect if this was an unclean disconnect and we have a stored session key
+    if !state.was_intentional_disconnect() {
+        let session_key = storage::get_session_key(&peer.id);
+        if session_key.is_some() && !peer.addr.is_empty() {
+            tokio::spawn(reconnect_with_backoff(
+                app.clone(),
+                state.clone(),
+                peer.clone(),
+                session_key.clone(),
+            ));
+        }
+    }
+}
+
+/// Boxed-dyn return type breaks the recursive async Send-inference cycle
+/// (connect_stream → reconnect_with_backoff → connect_stream …).
+fn reconnect_with_backoff(
+    app: AppHandle,
+    state: Arc<AppState>,
+    peer: PeerInfo,
+    session_key: Option<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let delays = [2u64, 5, 10, 20, 40];
+        for (i, delay) in delays.iter().enumerate() {
+            tokio::time::sleep(tokio::time::Duration::from_secs(*delay)).await;
+
+            if state.was_intentional_disconnect() { return; }
+            if state.connected_peer.lock().is_some() { return; }
+
+            tracing::info!("Auto-reconnect attempt {} to {}", i + 1, peer.name);
+            let _ = app.emit(
+                "reconnect-attempt",
+                serde_json::json!({
+                    "peer_id": peer.id,
+                    "attempt": i + 1,
+                    "max_attempts": delays.len(),
+                }),
+            );
+
+            let addr = format!("{}:{}", peer.addr, peer.port);
+            let stream = match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                TcpStream::connect(&addr),
+            ).await {
+                Ok(Ok(s)) => s,
+                _ => continue,
+            };
+            connect_stream(
+                app.clone(),
+                state.clone(),
+                stream,
+                peer.clone(),
+                String::new(),
+                session_key.clone(),
+            ).await;
+            if state.was_intentional_disconnect() { return; }
+        }
+        tracing::warn!("Auto-reconnect gave up for {}", peer.name);
+        let _ = app.emit("reconnect-gave-up", &peer.id);
+    })
 }

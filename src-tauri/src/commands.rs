@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 
-use crate::state::{AppState, MonitorInfo, PeerInfo, Settings, TransferInfo};
+use crate::state::{AppState, MonitorInfo, PeerInfo, PeerStatus, Settings, TransferInfo};
 use crate::network::protocol::NetCommand;
 use crate::storage::{self, KnownDevice};
 
@@ -46,11 +46,25 @@ pub async fn connect_to_device(
     peer_id: String,
     pin: String,
 ) -> Result<(), String> {
-    let peer = {
-        let peers = state.peers.lock();
-        peers.iter().find(|p| p.id == peer_id).cloned()
+    // Guard: reject if already connected to any device
+    if state.connected_peer.lock().is_some() {
+        return Err("Already connected to a device. Disconnect first.".to_string());
     }
-    .ok_or_else(|| "Peer not found".to_string())?;
+
+    // Guard: mark peer as Pairing to prevent duplicate connection attempts
+    let peer = {
+        let mut peers = state.peers.lock();
+        let peer = peers
+            .iter_mut()
+            .find(|p| p.id == peer_id)
+            .ok_or_else(|| "Peer not found".to_string())?;
+
+        if peer.status == PeerStatus::Connected || peer.status == PeerStatus::Pairing {
+            return Err("Already connecting or connected to this device".to_string());
+        }
+        peer.status = PeerStatus::Pairing;
+        peer.clone()
+    };
 
     let session_key = storage::get_session_key(&peer_id);
     let state_arc = state.inner().clone();
@@ -62,11 +76,13 @@ pub async fn connect_to_device(
 }
 
 #[tauri::command]
-pub async fn disconnect(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn disconnect(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.mark_intentional_disconnect();
     state.set_relaying(false);
     state.send_net(NetCommand::Disconnect);
     *state.connected_peer.lock() = None;
     *state.net_tx.lock() = None;
+    let _ = app.emit("disconnected", ());
     Ok(())
 }
 
@@ -78,10 +94,11 @@ pub async fn release_cursor(state: State<'_, Arc<AppState>>) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub async fn take_control(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn take_control(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     if state.connected_peer.lock().is_some() {
         state.set_relaying(true);
         state.send_net(NetCommand::FocusAcquired);
+        let _ = app.emit("relay-started", ());
         Ok(())
     } else {
         Err("Not connected to any device".to_string())
@@ -367,4 +384,48 @@ pub async fn join_internet_session(
         crate::network::relay::join_session(app, state_arc, relay_url, code, pin).await;
     });
     Ok(())
+}
+
+// ── Phone trackpad ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn start_trackpad(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let info = crate::network::trackpad::start(app, state.inner().clone()).await?;
+    Ok(serde_json::json!({
+        "url": info.url,
+        "port": info.port,
+        "token": info.token,
+        "qr_svg": info.qr_svg,
+    }))
+}
+
+#[tauri::command]
+pub async fn stop_trackpad(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    crate::network::trackpad::stop(state.inner(), &app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_trackpad_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    use std::sync::atomic::Ordering;
+    let port = state.trackpad_port.load(Ordering::SeqCst);
+    if port == 0 {
+        return Ok(serde_json::json!({ "running": false }));
+    }
+    let token = state.trackpad_token.lock().clone().unwrap_or_default();
+    let clients = state.trackpad_clients.load(Ordering::SeqCst);
+    Ok(serde_json::json!({
+        "running": true,
+        "port": port,
+        "token": token,
+        "clients": clients,
+    }))
 }

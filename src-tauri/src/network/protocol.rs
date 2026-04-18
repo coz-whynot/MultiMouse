@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
+use crate::crypto::encryption::Channel;
+
 
 pub const MULTIMOUSE_PORT: u16 = 57172;
 pub const TRANSFER_PORT: u16 = 57174;
 pub const MULTIMOUSE_SERVICE: &str = "_multimouse._tcp.local.";
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data")]
@@ -32,6 +35,11 @@ pub enum Message {
     Input(InputEvent),
     ClipboardText {
         text: String,
+    },
+    ClipboardImage {
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
     },
     Ping {
         ts: u64,
@@ -93,58 +101,59 @@ pub enum NetCommand {
     FocusAcquired,
     FocusReleased,
     ClipboardText(String),
+    ClipboardImage { width: u32, height: u32, bytes: Vec<u8> },
     Ping(u64),
     Disconnect,
 }
 
-pub async fn read_message(stream: &mut tokio::net::TcpStream) -> Option<Message> {
-    use tokio::io::AsyncReadExt;
+pub async fn read_enc_message<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    dec: &Channel,
+) -> Option<Message> {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.ok()?;
+    reader.read_exact(&mut len_buf).await.ok()?;
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len > 1024 * 1024 {
-        return None;
-    }
+    if len > 2 * 1024 * 1024 { return None; }
     let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await.ok()?;
-    serde_json::from_slice(&buf).ok()
+    reader.read_exact(&mut buf).await.ok()?;
+    let plain = dec.open(&buf)?;
+    serde_json::from_slice(&plain).ok()
 }
 
-pub async fn send_message(stream: &mut tokio::net::TcpStream, msg: &Message) -> bool {
-    use tokio::io::AsyncWriteExt;
-    let data = match serde_json::to_vec(msg) {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
-    let len = data.len() as u32;
-    if stream.write_all(&len.to_be_bytes()).await.is_err() {
-        return false;
-    }
-    stream.write_all(&data).await.is_ok()
+pub async fn send_enc_message<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    msg: &Message,
+    enc: &mut Channel,
+) -> bool {
+    let data = match serde_json::to_vec(msg) { Ok(d) => d, Err(_) => return false };
+    let sealed = enc.seal(&data);
+    let len = sealed.len() as u32;
+    if writer.write_all(&len.to_be_bytes()).await.is_err() { return false; }
+    writer.write_all(&sealed).await.is_ok()
 }
 
-pub async fn read_transfer_msg(stream: &mut tokio::net::TcpStream) -> Option<TransferMessage> {
-    use tokio::io::AsyncReadExt;
+pub async fn read_enc_transfer_msg<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    dec: &Channel,
+) -> Option<TransferMessage> {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.ok()?;
+    reader.read_exact(&mut len_buf).await.ok()?;
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len > 256 * 1024 {
-        return None;
-    }
+    if len > 4 * 1024 * 1024 { return None; }
     let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await.ok()?;
-    serde_json::from_slice(&buf).ok()
+    reader.read_exact(&mut buf).await.ok()?;
+    let plain = dec.open(&buf)?;
+    serde_json::from_slice(&plain).ok()
 }
 
-pub async fn send_transfer_msg(stream: &mut tokio::net::TcpStream, msg: &TransferMessage) -> bool {
-    use tokio::io::AsyncWriteExt;
-    let data = match serde_json::to_vec(msg) {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
-    let len = data.len() as u32;
-    if stream.write_all(&len.to_be_bytes()).await.is_err() {
-        return false;
-    }
-    stream.write_all(&data).await.is_ok()
+pub async fn send_enc_transfer_msg<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    msg: &TransferMessage,
+    enc: &mut Channel,
+) -> bool {
+    let data = match serde_json::to_vec(msg) { Ok(d) => d, Err(_) => return false };
+    let sealed = enc.seal(&data);
+    let len = sealed.len() as u32;
+    if writer.write_all(&len.to_be_bytes()).await.is_err() { return false; }
+    writer.write_all(&sealed).await.is_ok()
 }

@@ -9,8 +9,9 @@ use uuid::Uuid;
 
 use crate::state::{AppState, TransferInfo};
 use crate::network::protocol::{
-    read_transfer_msg, send_transfer_msg, TransferMessage, TRANSFER_PORT,
+    read_enc_transfer_msg, send_enc_transfer_msg, TransferMessage, TRANSFER_PORT,
 };
+use crate::crypto::encryption;
 use crate::storage;
 
 const CHUNK_SIZE: usize = 65_536;
@@ -45,13 +46,19 @@ async fn handle_incoming(
     app: AppHandle,
     state: Arc<AppState>,
 ) {
+    // Encryption handshake
+    let (mut send_enc, recv_enc) = match encryption::server_handshake(&mut stream).await {
+        Some(h) => (h.send, h.recv),
+        None => return,
+    };
+
     // Authenticate
-    let (device_id, peer_name) = match read_transfer_msg(&mut stream).await {
+    let (device_id, peer_name) = match read_enc_transfer_msg(&mut stream, &recv_enc).await {
         Some(TransferMessage::Auth { session_key, device_id }) => {
             match storage::get_known_device(&device_id) {
                 Some(d) if d.session_key == session_key => (device_id, d.name),
                 _ => {
-                    let _ = send_transfer_msg(&mut stream, &TransferMessage::AuthFail).await;
+                    let _ = send_enc_transfer_msg(&mut stream, &TransferMessage::AuthFail, &mut send_enc).await;
                     return;
                 }
             }
@@ -59,12 +66,12 @@ async fn handle_incoming(
         _ => return,
     };
 
-    if !send_transfer_msg(&mut stream, &TransferMessage::AuthOk).await {
+    if !send_enc_transfer_msg(&mut stream, &TransferMessage::AuthOk, &mut send_enc).await {
         return;
     }
 
     // File offer
-    let (transfer_id, file_name, file_size) = match read_transfer_msg(&mut stream).await {
+    let (transfer_id, file_name, file_size) = match read_enc_transfer_msg(&mut stream, &recv_enc).await {
         Some(TransferMessage::FileOffer { id, name, size }) => (id, name, size),
         _ => return,
     };
@@ -108,18 +115,18 @@ async fn handle_incoming(
     state.pending_offers.lock().remove(&transfer_id);
 
     if !accepted {
-        let _ = send_transfer_msg(&mut stream, &TransferMessage::FileReject {
+        let _ = send_enc_transfer_msg(&mut stream, &TransferMessage::FileReject {
             id: transfer_id.clone(),
-        })
+        }, &mut send_enc)
         .await;
         set_status(&state, &transfer_id, "rejected");
         let _ = app.emit("transfer-update", snapshot(&state));
         return;
     }
 
-    if !send_transfer_msg(&mut stream, &TransferMessage::FileAccept {
+    if !send_enc_transfer_msg(&mut stream, &TransferMessage::FileAccept {
         id: transfer_id.clone(),
-    })
+    }, &mut send_enc)
     .await
     {
         return;
@@ -149,7 +156,7 @@ async fn handle_incoming(
     let mut received: u64 = 0;
 
     loop {
-        match read_transfer_msg(&mut stream).await {
+        match read_enc_transfer_msg(&mut stream, &recv_enc).await {
             Some(TransferMessage::FileChunk { id, data, .. }) if id == transfer_id => {
                 let bytes =
                     match base64::engine::general_purpose::STANDARD.decode(&data) {
@@ -237,19 +244,29 @@ pub async fn send_files(
             }
         };
 
-        if !send_transfer_msg(
+        // Encryption handshake
+        let (mut send_enc, recv_enc) = match encryption::client_handshake(&mut stream).await {
+            Some(h) => (h.send, h.recv),
+            None => {
+                let _ = app.emit("transfer-error", "Encryption failed");
+                continue;
+            }
+        };
+
+        if !send_enc_transfer_msg(
             &mut stream,
             &TransferMessage::Auth {
                 session_key: session_key.clone(),
                 device_id: state.device_id.clone(),
             },
+            &mut send_enc,
         )
         .await
         {
             continue;
         }
 
-        match read_transfer_msg(&mut stream).await {
+        match read_enc_transfer_msg(&mut stream, &recv_enc).await {
             Some(TransferMessage::AuthOk) => {}
             _ => {
                 let _ = app.emit("transfer-error", "Auth failed — re-pair with this device");
@@ -282,13 +299,14 @@ pub async fn send_files(
         }
         let _ = app.emit("transfer-update", snapshot(&state));
 
-        if !send_transfer_msg(
+        if !send_enc_transfer_msg(
             &mut stream,
             &TransferMessage::FileOffer {
                 id: transfer_id.clone(),
                 name: file_name.clone(),
                 size: file_size,
             },
+            &mut send_enc,
         )
         .await
         {
@@ -296,7 +314,7 @@ pub async fn send_files(
             continue;
         }
 
-        match read_transfer_msg(&mut stream).await {
+        match read_enc_transfer_msg(&mut stream, &recv_enc).await {
             Some(TransferMessage::FileAccept { id }) if id == transfer_id => {}
             _ => {
                 set_status(&state, &transfer_id, "rejected");
@@ -332,13 +350,14 @@ pub async fn send_files(
             };
             let encoded =
                 base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-            if !send_transfer_msg(
+            if !send_enc_transfer_msg(
                 &mut stream,
                 &TransferMessage::FileChunk {
                     id: transfer_id.clone(),
                     offset,
                     data: encoded,
                 },
+                &mut send_enc,
             )
             .await
             {
@@ -351,21 +370,23 @@ pub async fn send_files(
         }
 
         if ok {
-            send_transfer_msg(
+            send_enc_transfer_msg(
                 &mut stream,
                 &TransferMessage::FileComplete {
                     id: transfer_id.clone(),
                 },
+                &mut send_enc,
             )
             .await;
             set_status(&state, &transfer_id, "done");
         } else {
-            let _ = send_transfer_msg(
+            let _ = send_enc_transfer_msg(
                 &mut stream,
                 &TransferMessage::FileError {
                     id: transfer_id.clone(),
                     reason: "IO error".to_string(),
                 },
+                &mut send_enc,
             )
             .await;
             set_status(&state, &transfer_id, "error");

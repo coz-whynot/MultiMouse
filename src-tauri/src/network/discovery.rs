@@ -14,6 +14,9 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
         }
     };
 
+    // Store a clone so the app can shut it down cleanly on quit
+    *state.mdns.lock() = Some(mdns.clone());
+
     let hostname = format!(
         "{}.local.",
         state.device_name.replace(|c: char| !c.is_alphanumeric(), "-")

@@ -71,7 +71,10 @@ pub fn run() {
                 .tooltip("MultiMouse")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => toggle_window(app),
-                    "quit" => std::process::exit(0),
+                    "quit" => {
+                        shutdown_services(app);
+                        std::process::exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -95,6 +98,15 @@ pub fn run() {
 
             input::inject::start_injector();
             input::capture::start(app.handle().clone(), state.clone());
+
+            // Periodically refresh monitor info so edge detection stays accurate when
+            // displays are plugged/unplugged. 5s is cheap and updates feel instant.
+            let app_mon = app.handle().clone();
+            let state_mon = state.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                refresh_monitors(&app_mon, &state_mon);
+            });
 
             // Show window on first launch so the user sees something immediately.
             // They can close it to the tray after that.
@@ -126,9 +138,51 @@ pub fn run() {
             commands::join_internet_session,
             commands::accept_pairing,
             commands::reject_pairing,
+            commands::start_trackpad,
+            commands::stop_trackpad,
+            commands::get_trackpad_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MultiMouse");
+}
+
+fn refresh_monitors(app: &AppHandle, state: &Arc<AppState>) {
+    let Some(win) = app.get_webview_window("main") else { return };
+    let primary = win.primary_monitor().ok().flatten();
+    let Ok(available) = win.available_monitors() else { return };
+    let monitors: Vec<state::MonitorInfo> = available
+        .into_iter()
+        .map(|m| {
+            let is_primary = primary
+                .as_ref()
+                .and_then(|p| p.name())
+                .zip(m.name())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false);
+            state::MonitorInfo {
+                name: m.name().map(|s| s.as_str()).unwrap_or("Display").to_string(),
+                x: m.position().x,
+                y: m.position().y,
+                width: m.size().width,
+                height: m.size().height,
+                scale_factor: m.scale_factor(),
+                is_primary,
+            }
+        })
+        .collect();
+    *state.monitors.write() = monitors;
+}
+
+/// Graceful shutdown: deregister mDNS and drop its daemon so other devices on the LAN
+/// see us disappear immediately instead of waiting for the service TTL to expire.
+fn shutdown_services(app: &AppHandle) {
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        if let Some(mdns) = state.mdns.lock().take() {
+            let _ = mdns.shutdown();
+        }
+        // Best-effort disconnect from any active peer
+        state.send_net(network::protocol::NetCommand::Disconnect);
+    }
 }
 
 fn toggle_window(app: &AppHandle) {

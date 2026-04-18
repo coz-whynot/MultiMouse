@@ -1,13 +1,64 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
 import { PeerInfo } from '../types';
+import { useStore } from '../store/useStore';
 
 interface Props {
   connectedPeer?: PeerInfo;
   relaying: boolean;
 }
 
+/* ── Latency pill (green ≤30ms, yellow 31-80ms, red >80ms, gray if null) ── */
+const LatencyPill = ({ ms }: { ms?: number | null }) => {
+  let dotColor: string;
+  let textColor: string;
+  let bg: string;
+  let border: string;
+  let label: string;
+
+  if (ms == null) {
+    dotColor = 'rgba(255,255,255,0.3)';
+    textColor = 'rgba(255,255,255,0.45)';
+    bg = 'rgba(255,255,255,0.06)';
+    border = 'rgba(255,255,255,0.1)';
+    label = '—';
+  } else if (ms <= 30) {
+    dotColor = '#34d399';
+    textColor = '#6ee7b7';
+    bg = 'rgba(16,185,129,0.12)';
+    border = 'rgba(16,185,129,0.25)';
+    label = `${Math.round(ms)} ms`;
+  } else if (ms <= 80) {
+    dotColor = '#fbbf24';
+    textColor = '#fcd34d';
+    bg = 'rgba(245,158,11,0.12)';
+    border = 'rgba(245,158,11,0.28)';
+    label = `${Math.round(ms)} ms`;
+  } else {
+    dotColor = '#f87171';
+    textColor = '#fca5a5';
+    bg = 'rgba(239,68,68,0.12)';
+    border = 'rgba(239,68,68,0.28)';
+    label = `${Math.round(ms)} ms`;
+  }
+
+  return (
+    <span
+      className="flex items-center gap-1.5 rounded-full px-2 py-[3px] text-[10px] font-semibold flex-shrink-0"
+      style={{ background: bg, border: `1px solid ${border}`, color: textColor }}
+      title={ms == null ? 'No latency data yet' : `${Math.round(ms)} ms round-trip`}
+    >
+      <span
+        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+        style={{ background: dotColor }}
+      />
+      {label}
+    </span>
+  );
+};
+
 export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
+  const isLight = useStore((s) => s.settings?.theme === 'light');
   const handleDisconnect = () => invoke('disconnect');
   const handleRelease = () => invoke('release_cursor');
 
@@ -15,63 +66,80 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
     <AnimatePresence>
       {connectedPeer && (
         <motion.div
-          initial={{ opacity: 0, scale: 0.96, y: -4 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.96, y: -4 }}
-          transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+          initial={{ opacity: 0, y: -8, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -8, scale: 0.97 }}
+          transition={{ type: 'spring', stiffness: 440, damping: 34 }}
           className="mx-3 mb-3 rounded-2xl overflow-hidden"
           style={{
             background: relaying
-              ? 'linear-gradient(135deg, rgba(99,102,241,0.22) 0%, rgba(168,85,247,0.18) 100%)'
-              : 'linear-gradient(135deg, rgba(16,185,129,0.15) 0%, rgba(5,150,105,0.12) 100%)',
-            border: `1px solid ${relaying ? 'rgba(99,102,241,0.35)' : 'rgba(16,185,129,0.3)'}`,
+              ? 'linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(168,85,247,0.16) 100%)'
+              : 'linear-gradient(135deg, rgba(16,185,129,0.14) 0%, rgba(5,150,105,0.10) 100%)',
+            border: `1px solid ${relaying ? 'rgba(99,102,241,0.32)' : 'rgba(16,185,129,0.25)'}`,
             boxShadow: relaying
-              ? '0 4px 20px rgba(99,102,241,0.15)'
-              : '0 4px 20px rgba(16,185,129,0.1)',
+              ? '0 4px 24px rgba(99,102,241,0.12)'
+              : '0 4px 20px rgba(16,185,129,0.08)',
           }}
         >
-          <div className="flex items-center gap-3 px-4 py-3">
-            {/* Animated status dot */}
-            <div className="relative flex-shrink-0">
+          <div className="flex items-center gap-3 px-3.5 py-2.5">
+            {/* Status dot with clean pulse */}
+            <div className="relative flex-shrink-0 w-3 h-3">
               <motion.div
-                animate={{ scale: [1, 1.6, 1], opacity: [1, 0, 1] }}
-                transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
                 className="absolute inset-0 rounded-full"
+                animate={{ scale: [1, 2.2, 1], opacity: [0.6, 0, 0.6] }}
+                transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
                 style={{ background: relaying ? '#6366f1' : '#10b981' }}
               />
               <div
-                className="w-3 h-3 rounded-full relative z-10"
+                className="w-3 h-3 rounded-full"
                 style={{ background: relaying ? '#818cf8' : '#34d399' }}
               />
             </div>
 
             {/* Text */}
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-white truncate">
-                {relaying ? `Controlling ${connectedPeer.name}` : `Linked · ${connectedPeer.name}`}
-              </p>
-              <p className="text-xs text-white/45 mt-0.5">
-                {relaying ? 'Mouse & keyboard are forwarding' : 'Move cursor to edge to take control'}
+              <div className="flex items-center gap-2">
+                <p
+                  className="text-sm font-semibold leading-tight truncate"
+                  style={{ color: isLight ? '#1e1b4b' : '#ffffff' }}
+                >
+                  {relaying ? `Controlling ${connectedPeer.name}` : `Linked · ${connectedPeer.name}`}
+                </p>
+                <LatencyPill ms={connectedPeer.ping_ms} />
+              </div>
+              <p
+                className="text-[11px] mt-0.5"
+                style={{ color: isLight ? 'rgba(30,27,75,0.55)' : 'rgba(255,255,255,0.4)' }}
+              >
+                {relaying
+                  ? 'Mouse & keyboard forwarding'
+                  : 'Push cursor to configured edge to take control'}
               </p>
             </div>
 
-            {/* Actions */}
+            {/* Action buttons */}
             <div className="flex gap-1.5 flex-shrink-0">
               {relaying && (
                 <button
                   onClick={handleRelease}
-                  className="text-xs px-3 py-1.5 rounded-xl font-medium transition-all
-                    text-white/70 hover:text-white"
-                  style={{ background: 'rgba(255,255,255,0.08)' }}
+                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-all"
+                  style={{
+                    background: 'rgba(255,255,255,0.07)',
+                    color: 'rgba(255,255,255,0.65)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                  }}
                 >
                   Release
                 </button>
               )}
               <button
                 onClick={handleDisconnect}
-                className="text-xs px-3 py-1.5 rounded-xl font-medium transition-all
-                  text-red-400 hover:text-red-300"
-                style={{ background: 'rgba(239,68,68,0.12)' }}
+                className="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-all"
+                style={{
+                  background: 'rgba(239,68,68,0.1)',
+                  color: '#f87171',
+                  border: '1px solid rgba(239,68,68,0.18)',
+                }}
               >
                 End
               </button>

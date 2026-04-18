@@ -7,6 +7,7 @@ interface Store {
   settings: Settings | null;
   pairingRequest: PairingRequest | null;
   connectingTo: string | null;
+  shownPin: string | null;
   currentPage: 'home' | 'layout' | 'settings';
   transfers: TransferInfo[];
   fileOffer: FileOffer | null;
@@ -16,6 +17,7 @@ interface Store {
   setSettings: (settings: Settings) => void;
   setPairingRequest: (req: PairingRequest | null) => void;
   setConnectingTo: (id: string | null) => void;
+  setShownPin: (pin: string | null) => void;
   setPage: (page: 'home' | 'layout' | 'settings') => void;
   setTransfers: (transfers: TransferInfo[]) => void;
   setFileOffer: (offer: FileOffer | null) => void;
@@ -27,6 +29,7 @@ export const useStore = create<Store>((set) => ({
   settings: null,
   pairingRequest: null,
   connectingTo: null,
+  shownPin: null,
   currentPage: 'home',
   transfers: [],
   fileOffer: null,
@@ -36,6 +39,7 @@ export const useStore = create<Store>((set) => ({
   setSettings: (settings) => set({ settings }),
   setPairingRequest: (req) => set({ pairingRequest: req }),
   setConnectingTo: (id) => set({ connectingTo: id }),
+  setShownPin: (pin) => set({ shownPin: pin }),
   setPage: (page) => set({ currentPage: page }),
   setTransfers: (transfers) => set({ transfers }),
   setFileOffer: (offer) => set({ fileOffer: offer }),

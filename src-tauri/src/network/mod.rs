@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod protocol;
 pub mod relay;
 pub mod server;
+pub mod trackpad;
 pub mod transfer;
 
 use std::sync::Arc;

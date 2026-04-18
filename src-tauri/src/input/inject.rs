@@ -3,10 +3,20 @@ use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings
 use once_cell::sync::OnceCell;
 use crate::network::protocol::InputEvent;
 
-static INJECT_TX: OnceCell<Sender<InputEvent>> = OnceCell::new();
+/// Local-only inject commands (not serialized on the wire). Protocol-level events
+/// come in as InputEvent::Remote; trackpad/UI-level commands use the other variants.
+pub enum InjectCmd {
+    Remote(InputEvent),
+    MoveRel { dx: i32, dy: i32 },
+    Scroll { dx: i32, dy: i32 },
+    Button { button: u8, pressed: bool },
+    Text(String),
+}
+
+static INJECT_TX: OnceCell<Sender<InjectCmd>> = OnceCell::new();
 
 pub fn start_injector() {
-    let (tx, rx) = mpsc::channel::<InputEvent>();
+    let (tx, rx) = mpsc::channel::<InjectCmd>();
     INJECT_TX.set(tx).ok();
 
     std::thread::spawn(move || {
@@ -17,15 +27,69 @@ pub fn start_injector() {
                 return;
             }
         };
-        while let Ok(event) = rx.recv() {
-            inject(&mut enigo, event);
+        while let Ok(cmd) = rx.recv() {
+            inject_cmd(&mut enigo, cmd);
         }
     });
 }
 
 pub fn process_event(event: InputEvent) {
     if let Some(tx) = INJECT_TX.get() {
-        let _ = tx.send(event);
+        let _ = tx.send(InjectCmd::Remote(event));
+    }
+}
+
+pub fn inject_move_rel(dx: i32, dy: i32) {
+    if let Some(tx) = INJECT_TX.get() {
+        let _ = tx.send(InjectCmd::MoveRel { dx, dy });
+    }
+}
+
+pub fn inject_scroll(dx: i32, dy: i32) {
+    if let Some(tx) = INJECT_TX.get() {
+        let _ = tx.send(InjectCmd::Scroll { dx, dy });
+    }
+}
+
+pub fn inject_button(button: u8, pressed: bool) {
+    if let Some(tx) = INJECT_TX.get() {
+        let _ = tx.send(InjectCmd::Button { button, pressed });
+    }
+}
+
+pub fn inject_text(text: String) {
+    if let Some(tx) = INJECT_TX.get() {
+        let _ = tx.send(InjectCmd::Text(text));
+    }
+}
+
+fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
+    match cmd {
+        InjectCmd::Remote(event) => inject(enigo, event),
+        InjectCmd::MoveRel { dx, dy } => {
+            let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
+        }
+        InjectCmd::Scroll { dx, dy } => {
+            if dy != 0 {
+                let _ = enigo.scroll(dy, enigo::Axis::Vertical);
+            }
+            if dx != 0 {
+                let _ = enigo.scroll(dx, enigo::Axis::Horizontal);
+            }
+        }
+        InjectCmd::Button { button, pressed } => {
+            let btn = match button {
+                0 => Button::Left,
+                1 => Button::Right,
+                2 => Button::Middle,
+                _ => return,
+            };
+            let dir = if pressed { Direction::Press } else { Direction::Release };
+            let _ = enigo.button(btn, dir);
+        }
+        InjectCmd::Text(text) => {
+            let _ = enigo.text(&text);
+        }
     }
 }
 

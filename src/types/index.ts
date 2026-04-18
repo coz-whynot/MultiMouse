@@ -22,6 +22,9 @@ export interface Settings {
   launch_on_startup: boolean;
   theme: 'dark' | 'light';
   relay_url: string;
+  edge_dwell_ms: number;
+  onboarding_done: boolean;
+  auto_reconnect: boolean;
 }
 
 export interface PairingRequest {

@@ -34,3 +34,11 @@ hostname = "0.4"
 arboard = "3"
 dirs = "5"
 base64 = "0.22"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }

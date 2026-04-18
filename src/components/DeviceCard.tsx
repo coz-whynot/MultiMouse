@@ -1,6 +1,10 @@
 import { motion } from 'framer-motion';
 import { PeerInfo } from '../types';
 
+// TODO: display a "last seen" timestamp for offline/paired-but-absent peers.
+// Planned: backend needs to track and expose a `last_seen` field on PeerInfo/KnownDevice
+// before we can render it here. Not implemented in this pass.
+
 interface Props {
   peer: PeerInfo;
   onConnect: (id: string) => void;
@@ -26,13 +30,36 @@ function pickPalette(name: string) {
 const PingBadge = ({ ms }: { ms?: number }) => {
   if (ms == null) return null;
   const color = ms < 20 ? '#4ade80' : ms < 60 ? '#fbbf24' : '#f87171';
-  return <span className="text-xs font-mono" style={{ color }}>{ms}ms</span>;
+  const label = ms < 20 ? 'Excellent' : ms < 60 ? 'Good' : 'Slow';
+  return (
+    <span
+      className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full"
+      style={{ color, background: color + '18' }}
+    >
+      {ms}ms · {label}
+    </span>
+  );
+};
+
+const StatusText = ({
+  peer,
+  isConnecting,
+}: {
+  peer: PeerInfo;
+  isConnecting: boolean;
+}) => {
+  if (peer.status === 'connected') return <span style={{ color: '#a78bfa' }}>Connected</span>;
+  if (isConnecting || peer.status === 'pairing')
+    return <span style={{ color: '#fbbf24' }}>Awaiting approval…</span>;
+  if (peer.status === 'error') return <span style={{ color: '#f87171' }}>Failed to connect</span>;
+  return <span style={{ color: 'rgba(255,255,255,0.4)' }}>Tap to connect</span>;
 };
 
 export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
   const isConnected = peer.status === 'connected';
   const pal = pickPalette(peer.name);
   const initial = peer.name.charAt(0).toUpperCase();
+  const clickable = !isConnected && !isConnecting;
 
   return (
     <motion.div
@@ -40,45 +67,54 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
       initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -8, scale: 0.95 }}
-      whileTap={!isConnected ? { scale: 0.975 } : undefined}
+      whileTap={clickable ? { scale: 0.975 } : undefined}
       transition={{ type: 'spring', stiffness: 380, damping: 28 }}
-      className="relative flex items-center gap-4 rounded-2xl px-4 py-3.5 cursor-pointer"
+      className="relative flex items-center gap-3.5 rounded-2xl px-4 py-3.5"
       style={{
         background: isConnected
-          ? 'linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(168,85,247,0.15) 100%)'
-          : `linear-gradient(135deg, ${pal.a}18 0%, ${pal.b}0c 100%)`,
-        border: `1.5px solid ${isConnected ? 'rgba(99,102,241,0.38)' : pal.a + '35'}`,
-        boxShadow: `0 4px 16px ${isConnected ? 'rgba(99,102,241,0.12)' : pal.a + '12'}`,
+          ? 'linear-gradient(135deg, rgba(99,102,241,0.18) 0%, rgba(168,85,247,0.13) 100%)'
+          : `linear-gradient(135deg, ${pal.a}14 0%, ${pal.b}09 100%)`,
+        border: `1.5px solid ${isConnected ? 'rgba(99,102,241,0.35)' : pal.a + '30'}`,
+        boxShadow: isConnected
+          ? '0 4px 20px rgba(99,102,241,0.1)'
+          : `0 2px 12px ${pal.a}10`,
+        cursor: clickable ? 'pointer' : 'default',
       }}
-      onClick={() => !isConnected && onConnect(peer.id)}
+      onClick={() => clickable && onConnect(peer.id)}
     >
-      {/* Circular avatar */}
+      {/* Avatar */}
       <div className="relative flex-shrink-0">
         <div
-          className="w-14 h-14 rounded-2xl flex items-center justify-center"
+          className="w-12 h-12 rounded-xl flex items-center justify-center text-xl font-black text-white"
           style={{
             background: `linear-gradient(135deg, ${pal.a}, ${pal.b})`,
-            boxShadow: `0 6px 22px ${pal.a}55`,
+            boxShadow: `0 4px 16px ${pal.a}50`,
           }}
         >
-          <span className="text-2xl font-black text-white">{initial}</span>
+          {initial}
         </div>
 
-        {/* Status ring when connected */}
+        {/* Pulsing ring when connected */}
         {isConnected && (
           <motion.div
-            animate={{ scale: [1, 1.18, 1], opacity: [0.6, 0.2, 0.6] }}
-            transition={{ repeat: Infinity, duration: 2 }}
-            className="absolute inset-0 rounded-2xl"
-            style={{ boxShadow: `0 0 0 3px #818cf8` }}
+            animate={{ scale: [1, 1.22, 1], opacity: [0.5, 0, 0.5] }}
+            transition={{ repeat: Infinity, duration: 2.2 }}
+            className="absolute inset-0 rounded-xl pointer-events-none"
+            style={{ border: '2px solid #818cf8' }}
           />
         )}
 
         {/* Status dot */}
         <div
-          className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2"
+          className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-2"
           style={{
-            background: isConnected ? '#6366f1' : peer.status === 'pairing' ? '#fbbf24' : peer.status === 'error' ? '#ef4444' : '#10b981',
+            background: isConnected
+              ? '#818cf8'
+              : peer.status === 'pairing' || isConnecting
+              ? '#fbbf24'
+              : peer.status === 'error'
+              ? '#ef4444'
+              : '#10b981',
             borderColor: '#100c2a',
           }}
         />
@@ -86,22 +122,22 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-0.5">
-          <p className="text-base font-bold text-white truncate leading-tight">{peer.name}</p>
+        <div className="flex items-center gap-2 mb-1">
+          <p className="text-sm font-bold text-white truncate leading-tight">{peer.name}</p>
           {peer.is_known && !isConnected && (
             <span
-              className="text-[10px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide flex-shrink-0"
-              style={{ background: pal.a + '28', color: pal.a }}
+              className="text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide flex-shrink-0"
+              style={{ background: pal.a + '22', color: pal.a, border: `1px solid ${pal.a}30` }}
             >
               Paired
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm" style={{ color: 'rgba(255,255,255,0.48)' }}>
-            {isConnected ? 'Connected' : peer.status === 'pairing' ? 'Awaiting approval…' : peer.status === 'error' ? 'Error' : 'Tap to connect'}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs">
+            <StatusText peer={peer} isConnecting={isConnecting} />
           </span>
-          <PingBadge ms={peer.ping_ms} />
+          {isConnected && peer.ping_ms != null && <PingBadge ms={peer.ping_ms} />}
         </div>
       </div>
 
@@ -109,27 +145,27 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
       {isConnected ? (
         <div className="flex-shrink-0 flex items-center gap-1.5">
           <motion.div
-            className="w-2.5 h-2.5 rounded-full"
-            animate={{ scale: [1, 1.5, 1] }}
-            transition={{ repeat: Infinity, duration: 1.6 }}
+            className="w-2 h-2 rounded-full"
+            animate={{ scale: [1, 1.6, 1], opacity: [1, 0.4, 1] }}
+            transition={{ repeat: Infinity, duration: 1.8 }}
             style={{ background: '#818cf8' }}
           />
-          <span className="text-xs font-semibold" style={{ color: '#818cf8' }}>Active</span>
+          <span className="text-xs font-semibold" style={{ color: '#a78bfa' }}>Live</span>
         </div>
       ) : isConnecting ? (
         <motion.div
           animate={{ rotate: 360 }}
           transition={{ repeat: Infinity, duration: 0.85, ease: 'linear' }}
           className="flex-shrink-0 w-5 h-5 rounded-full border-2"
-          style={{ borderColor: pal.a + '35', borderTopColor: pal.a }}
+          style={{ borderColor: pal.a + '30', borderTopColor: pal.a }}
         />
       ) : (
         <div
-          className="flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center"
-          style={{ background: pal.a + '22' }}
+          className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center"
+          style={{ background: pal.a + '18', border: `1px solid ${pal.a}28` }}
         >
-          <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke={pal.a}>
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke={pal.a} strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
           </svg>
         </div>
       )}

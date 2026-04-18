@@ -10,49 +10,64 @@ function fmt(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+function FileIcon({ direction }: { direction: 'sending' | 'receiving' }) {
+  return direction === 'sending' ? (
+    <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="rgba(167,139,250,0.8)" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+    </svg>
+  ) : (
+    <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="rgba(52,211,153,0.8)" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+    </svg>
+  );
+}
+
 function TransferRow({ t }: { t: TransferInfo }) {
   const pct = t.size > 0 ? Math.round((t.transferred / t.size) * 100) : 0;
   const isActive = t.status === 'active' || t.status === 'pending';
 
-  const statusColor = {
-    pending: 'text-white/40',
-    active: 'text-accent-400',
-    done: 'text-emerald-400',
-    error: 'text-red-400',
-    rejected: 'text-white/30',
-  }[t.status] ?? 'text-white/40';
+  const statusColor =
+    t.status === 'done'
+      ? '#34d399'
+      : t.status === 'error'
+      ? '#f87171'
+      : t.status === 'active'
+      ? '#a78bfa'
+      : 'rgba(255,255,255,0.35)';
 
-  const statusLabel = {
-    pending: t.direction === 'receiving' ? 'Waiting…' : 'Offering…',
-    active: `${pct}%`,
-    done: 'Done',
-    error: 'Error',
-    rejected: 'Rejected',
-  }[t.status] ?? '';
+  const statusLabel =
+    t.status === 'pending'
+      ? t.direction === 'receiving'
+        ? 'Waiting…'
+        : 'Offering…'
+      : t.status === 'active'
+      ? `${pct}%`
+      : t.status === 'done'
+      ? 'Done'
+      : t.status === 'error'
+      ? 'Error'
+      : 'Declined';
 
   return (
-    <div className="flex flex-col gap-1.5 py-2.5 border-b border-white/[0.05] last:border-0">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-lg">
-            {t.direction === 'sending' ? '↑' : '↓'}
-          </span>
-          <div className="min-w-0">
-            <p className="text-xs font-medium text-white/80 truncate">{t.name}</p>
-            <p className="text-[10px] text-white/30">
-              {t.peer_name} · {fmt(t.size)}
-            </p>
-          </div>
+    <div className="flex flex-col gap-1.5 py-2.5 border-b last:border-0" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+      <div className="flex items-center gap-2.5">
+        <FileIcon direction={t.direction} />
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-medium truncate" style={{ color: 'rgba(255,255,255,0.82)' }}>{t.name}</p>
+          <p className="text-[10px] mt-0.5" style={{ color: 'rgba(255,255,255,0.3)' }}>
+            {t.peer_name} · {fmt(t.size)}
+          </p>
         </div>
-        <span className={`text-xs font-mono font-semibold flex-shrink-0 ${statusColor}`}>
+        <span className="text-xs font-mono font-semibold flex-shrink-0" style={{ color: statusColor }}>
           {statusLabel}
         </span>
       </div>
 
       {isActive && (
-        <div className="w-full h-1 bg-white/[0.06] rounded-full overflow-hidden">
+        <div className="w-full h-1 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
           <motion.div
-            className="h-full bg-gradient-to-r from-accent-500 to-purple-500 rounded-full"
+            className="h-full rounded-full"
+            style={{ background: 'linear-gradient(90deg, #6366f1, #a855f7)' }}
             initial={{ width: 0 }}
             animate={{ width: `${pct}%` }}
             transition={{ ease: 'linear', duration: 0.3 }}
@@ -78,28 +93,38 @@ function FileOfferModal({ offer, onClose }: { offer: FileOffer; onClose: () => v
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 flex items-end justify-center z-50 p-3"
-      style={{ background: 'rgba(8,8,18,0.6)', backdropFilter: 'blur(8px)' }}
+      className="fixed inset-0 flex items-end justify-center z-50 p-3 pb-20"
+      style={{ background: 'rgba(6,6,16,0.65)', backdropFilter: 'blur(10px)' }}
     >
       <motion.div
-        initial={{ y: 40, opacity: 0 }}
+        initial={{ y: 48, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
-        exit={{ y: 40, opacity: 0 }}
-        className="w-full rounded-2xl p-4 border border-white/10"
-        style={{ background: 'rgba(19,19,42,0.98)' }}
+        exit={{ y: 48, opacity: 0 }}
+        transition={{ type: 'spring', stiffness: 400, damping: 34 }}
+        className="w-full rounded-2xl p-4"
+        style={{
+          background: 'linear-gradient(160deg, rgba(22,20,50,0.99) 0%, rgba(16,14,38,0.99) 100%)',
+          border: '1px solid rgba(99,102,241,0.2)',
+          boxShadow: '0 -8px 40px rgba(0,0,0,0.4)',
+        }}
       >
-        <div className="flex items-center gap-3 mb-3">
-          <div className="w-10 h-10 rounded-xl bg-accent-500/10 border border-accent-500/20
-            flex items-center justify-center flex-shrink-0">
-            <svg className="w-5 h-5 text-accent-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+        <div className="flex items-center gap-3 mb-4">
+          <div
+            className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{
+              background: 'rgba(99,102,241,0.12)',
+              border: '1px solid rgba(99,102,241,0.2)',
+            }}
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="rgba(167,139,250,0.9)" strokeWidth={1.8}>
+              <path strokeLinecap="round" strokeLinejoin="round"
                 d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
             </svg>
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-white truncate">{offer.name}</p>
-            <p className="text-xs text-white/40">
-              {offer.peer_name} wants to send you {fmt(offer.size)}
+            <p className="text-sm font-bold text-white truncate">{offer.name}</p>
+            <p className="text-xs mt-0.5" style={{ color: 'rgba(255,255,255,0.4)' }}>
+              {offer.peer_name} wants to send {fmt(offer.size)}
             </p>
           </div>
         </div>
@@ -107,19 +132,25 @@ function FileOfferModal({ offer, onClose }: { offer: FileOffer; onClose: () => v
         <div className="flex gap-2">
           <button
             onClick={handleReject}
-            className="flex-1 py-2.5 rounded-xl text-sm text-white/50
-              bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.07]
-              transition-all active:scale-[0.97]"
+            className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-all active:scale-[0.97]"
+            style={{
+              background: 'rgba(255,255,255,0.05)',
+              border: '1px solid rgba(255,255,255,0.09)',
+              color: 'rgba(255,255,255,0.5)',
+            }}
           >
             Decline
           </button>
           <button
             onClick={handleAccept}
-            className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-white
-              bg-gradient-to-r from-accent-500 to-purple-500
-              hover:opacity-90 transition-all active:scale-[0.97]"
+            className="flex-1 py-2.5 rounded-xl text-sm font-bold transition-all active:scale-[0.97]"
+            style={{
+              background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+              boxShadow: '0 4px 16px rgba(99,102,241,0.3)',
+              color: 'white',
+            }}
           >
-            Accept
+            Save to Downloads
           </button>
         </div>
       </motion.div>
@@ -149,8 +180,11 @@ export const TransferPanel = () => {
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="mx-3 mb-1 rounded-xl px-3 py-1
-              bg-white/[0.03] border border-white/[0.06]"
+            className="mx-3 mb-1.5 rounded-xl px-3 py-1 overflow-hidden"
+            style={{
+              background: 'rgba(255,255,255,0.025)',
+              border: '1px solid rgba(255,255,255,0.06)',
+            }}
           >
             {visible.map((t) => (
               <TransferRow key={t.id} t={t} />

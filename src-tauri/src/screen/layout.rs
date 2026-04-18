@@ -15,12 +15,7 @@ pub fn is_at_edge(x: f64, y: f64, edge: &str, monitors: &[MonitorInfo]) -> bool 
     }
 }
 
-pub fn get_screen_size() -> (f64, f64) {
-    let (w, h) = rdev::display_size().unwrap_or((1920, 1080));
-    (w as f64, h as f64)
-}
-
-fn virtual_bounds(monitors: &[MonitorInfo]) -> (f64, f64, f64, f64) {
+pub fn virtual_bounds(monitors: &[MonitorInfo]) -> (f64, f64, f64, f64) {
     if monitors.is_empty() {
         let (w, h) = rdev::display_size().unwrap_or((1920, 1080));
         return (0.0, 0.0, w as f64, h as f64);
