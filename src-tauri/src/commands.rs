@@ -95,6 +95,12 @@ pub async fn connect_to_device(
 pub async fn disconnect(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.mark_intentional_disconnect();
     state.set_relaying(false);
+    // Also raise the server_disconnect notify: if *this* device is the server
+    // half of the session (peer initiated the connection), the server's read
+    // loop will wake, observe intentional_disconnect=true, and send
+    // Message::EndedByPeer before tearing down the stream — so the peer's
+    // auto-reconnect knows not to immediately re-establish.
+    state.signal_disconnect();
     // Use the graceful helper so the writer task gets a chance to flush Bye
     // before we tear net_tx down. Previously we used try_send (silent drop on
     // full) and immediately dropped net_tx, which left Bye unsent.
@@ -105,12 +111,32 @@ pub async fn disconnect(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) 
 
 #[tauri::command]
 pub async fn release_cursor(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    state.set_relaying(false);
-    *state.relay_entry.lock() = None;
-    // Reset edge timestamps so stale values don't re-activate relay instantly.
-    state.reset_edge_state();
-    state.send_net(NetCommand::FocusReleased);
-    // Warp the local cursor to the center of this screen so the user can see it
+    // Release has two meanings depending on which side of the session this
+    // device is on:
+    //   - If we're the CONTROLLER (is_relaying): stop forwarding our input
+    //     and warp our own cursor back to center.
+    //   - If we're the RECEIVER (is_controlled): the "Release" button here
+    //     means "give me my mouse back" — same semantics as pressing Esc
+    //     on the receiver. Kick the controller + put it in cooldown so the
+    //     auto-reconnect on its side can't immediately re-lock the mouse.
+    let was_relaying = state.is_relaying();
+    let was_controlled = state.is_controlled();
+
+    if was_relaying {
+        state.set_relaying(false);
+        *state.relay_entry.lock() = None;
+        state.reset_edge_state();
+        state.send_net(NetCommand::FocusReleased);
+    }
+
+    if was_controlled {
+        if let Some(pid) = state.connected_peer.lock().clone() {
+            state.mark_peer_kicked(&pid);
+        }
+        state.signal_disconnect();
+    }
+
+    // Warp our cursor to center regardless so the user can find it.
     let monitors = state.monitors.read().clone();
     let (min_x, min_y, max_x, max_y) = crate::screen::layout::virtual_bounds(&monitors);
     crate::input::inject::warp_abs(

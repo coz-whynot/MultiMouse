@@ -6,7 +6,7 @@ use crate::crypto::encryption::Channel;
 pub const MULTIMOUSE_PORT: u16 = 57172;
 pub const TRANSFER_PORT: u16 = 57174;
 pub const MULTIMOUSE_SERVICE: &str = "_multimouse._tcp.local.";
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Hard cap on clipboard text bytes so a peer can't force us to buffer
 /// unbounded strings. 64 KiB is well beyond typical copy-paste text.
@@ -69,6 +69,11 @@ pub enum Message {
     /// edge and drops relay — same effect as pressing Esc, but driven by the
     /// natural "push through the other edge" gesture instead of a hotkey.
     ReturnToSender,
+    /// Sent right before either side drops the session intentionally (user
+    /// clicked End / Disconnect). Receiver of this message marks its own
+    /// `intentional_disconnect` flag so its auto-reconnect doesn't fire and
+    /// immediately re-establish the session the other user just ended.
+    EndedByPeer,
     /// Sent by both sides right after auth completes. Reports the sender's
     /// app version (not protocol version). Receiver compares with its own
     /// version; if peer is newer, UI nudges the local user to update via

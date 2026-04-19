@@ -264,6 +264,15 @@ pub async fn connect_stream(
             Message::PeerVersion { app_version } => {
                 let _ = app.emit("peer-version", app_version);
             }
+            Message::EndedByPeer => {
+                // The other side clicked End/Disconnect. Mark our own
+                // intentional flag so our reconnect loop doesn't fire and
+                // fight the user's intent.
+                tracing::info!("Peer ended the session — suppressing auto-reconnect");
+                state.mark_intentional_disconnect();
+                let _ = app.emit("session-ended-by-peer", ());
+                break;
+            }
             Message::ReturnToSender => {
                 // Receiver's cursor hit the far edge — user wants us to take
                 // back control. Do the same cleanup as a local Esc release.

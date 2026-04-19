@@ -422,15 +422,25 @@ pub async fn handle_controller(
     // inside the screen rather than right at the hard edge. macOS (and some
     // Windows configs) will clamp cursor coordinates at the very edge, so a
     // 3 px threshold was often unreachable in practice — the user would see
-    // the cursor "stuck" at the boundary instead of returning. Matches the
-    // EDGE_THRESHOLD spirit but slightly larger because it's a return-gesture,
-    // not an activation gesture, so accidental triggers are less costly.
+    // the cursor "stuck" at the boundary instead of returning.
     let return_edge_threshold: f64 = 15.0;
+    // Cursor enters at ~1 px from the edge and immediately satisfies the
+    // return threshold, which would bounce the session on the very first
+    // tick. Require the cursor to have first moved AWAY from the entry
+    // edge by at least this much before return-detection is allowed.
+    let departed_threshold: f64 = 60.0;
+    let mut departed = false;
     loop {
         let msg = tokio::select! {
             biased;
             _ = disconnect_signal.notified() => {
                 tracing::info!("Disconnect signaled — closing session from {}", peer_addr);
+                // If the LOCAL user ended the session (not just a takeback),
+                // tell the connected peer so its auto-reconnect doesn't kick
+                // in and re-establish the session we just ended.
+                if state.was_intentional_disconnect() {
+                    send_enc_message(&mut stream, &Message::EndedByPeer, &mut send_enc).await;
+                }
                 break;
             }
             _ = active_window_tick.tick() => {
@@ -501,10 +511,24 @@ pub async fn handle_controller(
                                     else                      { "bottom" }
                                 );
                                 return_sent = false;
+                                departed = false;
                             } else if !return_sent {
+                                // First the cursor has to move AWAY from the
+                                // entry edge by `departed_threshold`; otherwise
+                                // the entry position itself would re-satisfy
+                                // the return threshold and fire immediately.
+                                if !departed {
+                                    departed = match entry_edge {
+                                        Some("left")   => x_rel > departed_threshold,
+                                        Some("right")  => x_rel < lw - departed_threshold,
+                                        Some("top")    => y_rel > departed_threshold,
+                                        Some("bottom") => y_rel < lh - departed_threshold,
+                                        _ => false,
+                                    };
+                                }
                                 // Has the injected cursor reached the entry
                                 // edge again? If so, controller takes back.
-                                let at_return_edge = match entry_edge {
+                                let at_return_edge = departed && match entry_edge {
                                     Some("left")   => x_rel <= return_edge_threshold,
                                     Some("right")  => x_rel >= lw - return_edge_threshold - 1.0,
                                     Some("top")    => y_rel <= return_edge_threshold,
@@ -518,6 +542,7 @@ pub async fn handle_controller(
                                     let _ = app.emit("focus-released", ());
                                     tracing::info!("Cursor reached return edge {:?} — sent ReturnToSender", entry_edge);
                                     entry_edge = None;
+                                    departed = false;
                                 }
                             }
                         }
@@ -527,12 +552,14 @@ pub async fn handle_controller(
                         state.set_controlled(true);
                         entry_edge = None;
                         return_sent = false;
+                        departed = false;
                         let _ = app.emit("focus-acquired", ());
                     }
                     Message::FocusReleased => {
                         state.set_controlled(false);
                         entry_edge = None;
                         return_sent = false;
+                        departed = false;
                         let _ = app.emit("focus-released", ());
                     }
                     Message::ClipboardText { text } => {
