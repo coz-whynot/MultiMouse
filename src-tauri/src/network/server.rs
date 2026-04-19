@@ -418,7 +418,14 @@ pub async fn handle_controller(
     // ReturnToSender so the controller reclaims control without pressing Esc.
     let mut entry_edge: Option<&'static str> = None;
     let mut return_sent = false;
-    let return_edge_threshold: f64 = 3.0;
+    // Trigger the return-cursor handoff while the cursor is still ~15 px
+    // inside the screen rather than right at the hard edge. macOS (and some
+    // Windows configs) will clamp cursor coordinates at the very edge, so a
+    // 3 px threshold was often unreachable in practice — the user would see
+    // the cursor "stuck" at the boundary instead of returning. Matches the
+    // EDGE_THRESHOLD spirit but slightly larger because it's a return-gesture,
+    // not an activation gesture, so accidental triggers are less costly.
+    let return_edge_threshold: f64 = 15.0;
     loop {
         let msg = tokio::select! {
             biased;
