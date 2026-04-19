@@ -553,7 +553,7 @@ export default function App() {
         </AnimatePresence>
       </div>
 
-      <BottomNav current={currentPage as any} onChange={setPage as any} connectedPeer={connectedPeer} />
+      <BottomNav current={currentPage} onChange={setPage} connectedPeer={connectedPeer} />
 
       {/* Pairing modal */}
       <AnimatePresence>

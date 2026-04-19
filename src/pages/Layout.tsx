@@ -197,7 +197,7 @@ export const Layout = () => {
 
   const connectedPeer = peers.find((p) => p.id === status?.connected_peer);
   const relaying = status?.relaying ?? false;
-  const isControlled = (status as any)?.is_controlled ?? false;
+  const isControlled = status?.is_controlled ?? false;
   const edge: Edge = (settings?.transition_edge as Edge) ?? 'right';
 
   useEffect(() => {

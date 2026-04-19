@@ -152,12 +152,32 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
         }
 
         // If this device is currently being CONTROLLED by a peer (state.is_controlled),
-        // Escape key triggers a forced disconnect so the user can grab their mouse back.
-        // We can't send a message back (server-side has no net_tx), so we break the
-        // connection entirely — client will see disconnect and stop sending events.
+        // two paths let the receiver take back their machine:
+        //   1. Escape key — explicit escape hatch
+        //   2. ANY native user input (key press, mouse button) that wasn't just
+        //      echoed back from our own injection — signals "I'm trying to use
+        //      this machine myself" and drops the session.
+        // We can't send a message back (server-side has no net_tx), so we break
+        // the connection entirely; the controller's client sees disconnect.
         if state.is_controlled() {
-            if let EventType::KeyPress(rdev::Key::Escape) = &event.event_type {
-                tracing::info!("Receiver pressed Escape — signaling disconnect");
+            let is_user_input = match &event.event_type {
+                EventType::KeyPress(rdev::Key::Escape) => {
+                    tracing::info!("Receiver pressed Escape — signaling disconnect");
+                    true
+                }
+                EventType::KeyPress(_) | EventType::ButtonPress(_) => {
+                    // Distinguish native user input from our own echoed injection:
+                    // if we injected in the last 150ms this is probably the echo.
+                    if !inject::recently_injected(150) {
+                        tracing::info!("Receiver native input detected ({:?}) — releasing session", event.event_type);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if is_user_input {
                 state.signal_disconnect();
                 return None;
             }

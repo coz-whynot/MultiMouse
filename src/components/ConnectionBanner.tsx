@@ -114,7 +114,6 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
   }, [relaying]);
 
   const peerName = connectedPeer?.name ?? '';
-  const showActive = relaying && !!activeWindow;
 
   return (
     <AnimatePresence>
@@ -159,7 +158,7 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
                 >
                   {relaying ? (
                     <AnimatePresence mode="wait" initial={false}>
-                      {showActive ? (
+                      {activeWindow ? (
                         <motion.span
                           key={`active-${activeWindow}`}
                           initial={{ opacity: 0, y: 4 }}
@@ -168,7 +167,7 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
                           transition={{ duration: 0.18 }}
                           className="truncate"
                         >
-                          <span className="mr-1">{appEmoji(activeWindow!)}</span>
+                          <span className="mr-1">{appEmoji(activeWindow)}</span>
                           Controlling {activeWindow} on {peerName}
                         </motion.span>
                       ) : (

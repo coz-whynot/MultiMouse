@@ -25,6 +25,23 @@ static INJECT_TX: OnceCell<SyncSender<InjectCmd>> = OnceCell::new();
 static INJECT_READY: AtomicBool = AtomicBool::new(false);
 // Rate-limit the "queue full" warning so a flood doesn't spam the log.
 static LAST_FULL_WARN_MS: AtomicU64 = AtomicU64::new(0);
+/// Unix-ms of the last time we actually injected an OS event. Used by
+/// `capture.rs` on the receiver to distinguish our own injection (which rdev
+/// sees back through CGEventTap) from the local user's real hardware input.
+static LAST_INJECT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Was an inject done within the last `window_ms` milliseconds? If so, a
+/// contemporaneous rdev event is probably our echo rather than user input.
+pub fn recently_injected(window_ms: u64) -> bool {
+    let last = LAST_INJECT_MS.load(Ordering::Relaxed);
+    if last == 0 { return false; }
+    let now = start_ms();
+    now.saturating_sub(last) <= window_ms
+}
+
+fn mark_injected() {
+    LAST_INJECT_MS.store(start_ms(), Ordering::Relaxed);
+}
 
 fn start_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -169,6 +186,7 @@ fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
             let _ = enigo.text(&text);
         }
     }
+    mark_injected();
 }
 
 fn inject(enigo: &mut Enigo, event: InputEvent) {

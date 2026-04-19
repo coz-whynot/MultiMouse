@@ -12,7 +12,7 @@ use crate::network::protocol::{
     read_enc_message, send_enc_message,
 };
 use crate::crypto::encryption;
-use crate::input::inject;
+use crate::input::{active_window, inject};
 use crate::storage;
 
 /// Sentinel placed in `state.connected_peer` between accept and end-of-auth.
@@ -371,17 +371,55 @@ pub async fn handle_controller(
         }
     });
 
-    // Single-threaded read loop. The ONE select! branch is the
-    // `server_disconnect` notify, which is cancel-safe (Notify::notified
-    // resolves instantly). read_enc_message runs alone on its arm and is
-    // never cancelled mid-read.
+    // Single-threaded read loop. Cancel-safe branches only:
+    //   * `server_disconnect.notified()` — Notify is cancel-safe.
+    //   * `active_window_tick.tick()` — tokio::time::Interval is cancel-safe.
+    //   * `read_enc_message(...)` — NOT cancel-safe, so it must be the branch
+    //     that actually makes progress on a message. The outer loop only picks
+    //     ONE arm per iteration; if the interval fires, we handle it and
+    //     re-enter the select (the pending read is not yet started).
+    //
+    // The active-window poll runs on the controlled (receiver) side so the
+    // controller can display what app the remote cursor is acting on. We poll
+    // at 1 Hz only while `is_controlled` is true; idle sessions cost nothing.
     let disconnect_signal = state.server_disconnect.clone();
+    let mut active_window_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
+    active_window_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_active_window: Option<String> = None;
     loop {
         let msg = tokio::select! {
             biased;
             _ = disconnect_signal.notified() => {
                 tracing::info!("Disconnect signaled — closing session from {}", peer_addr);
                 break;
+            }
+            _ = active_window_tick.tick() => {
+                if state.is_controlled() {
+                    // `current_app()` shells out to xdotool on Linux, so it
+                    // must go through spawn_blocking or it would stall the
+                    // runtime. macOS/Windows paths are fast but we use the
+                    // same path for uniformity.
+                    let current = tokio::task::spawn_blocking(active_window::current_app)
+                        .await
+                        .ok()
+                        .flatten();
+                    if current != last_active_window {
+                        if let Some(ref name) = current {
+                            let out = Message::ActiveWindow { app_name: name.clone() };
+                            if let Ok(data) = serde_json::to_vec(&out) {
+                                state.add_bytes_sent(data.len() as u64 + 32);
+                            }
+                            send_enc_message(&mut stream, &out, &mut send_enc).await;
+                        }
+                        last_active_window = current;
+                    }
+                } else if last_active_window.is_some() {
+                    // Session paused (user released control): forget the last
+                    // value so the next acquire re-sends even if the app is
+                    // unchanged.
+                    last_active_window = None;
+                }
+                continue;
             }
             r = read_enc_message(&mut stream, &mut recv_enc) => r,
         };
