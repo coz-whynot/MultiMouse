@@ -235,6 +235,11 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # Required to see and write to draft releases. Without this, the default
+    # GITHUB_TOKEN has only read access and the API call for draft releases
+    # returns an empty list ("release not found").
+    permissions:
+      contents: write
     steps:
       - name: Generate + upload latest.json
         env:
