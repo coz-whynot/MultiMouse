@@ -134,36 +134,66 @@ jobs:
         with:
           args: --target ${{ matrix.target }}
 
-      # Upload the updater-archive + its .sig to the release so the
-      # aggregation job at the end can build latest.json. tauri-action
-      # on its own refuses to ship the sigs here (it wants to generate
-      # latest.json itself, but fails because it only sees this
-      # platform's sig — see publish-updater-json below).
+      # Upload every updater archive + its .sig to the release. tauri-action
+      # won't ship the sigs on its own (it wants to generate latest.json
+      # itself, but fails because each platform job only has its own sig).
+      # Naming: macOS .app.tar.gz[.sig] collides across arm64/x64, so we
+      # rename with a target suffix. Other platforms' filenames already
+      # embed the version + arch.
       - name: Upload updater assets to release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-          BUNDLE: src-tauri/target/${{ matrix.target }}/release/bundle
+          TARGET: ${{ matrix.target }}
         run: |
           set -eu
-          shopt -s nullglob
-          # Files to upload: the updater archive for this platform + its sig.
-          candidates=(
-            "$BUNDLE"/macos/*.app.tar.gz
-            "$BUNDLE"/macos/*.app.tar.gz.sig
-            "$BUNDLE"/nsis/*.nsis.zip
-            "$BUNDLE"/nsis/*.nsis.zip.sig
-            "$BUNDLE"/appimage/*.AppImage.tar.gz
-            "$BUNDLE"/appimage/*.AppImage.tar.gz.sig
-          )
-          for f in "${candidates[@]}"; do
-            if [ -f "$f" ]; then
-              echo "Uploading $(basename "$f")"
-              gh release upload "$TAG" "$f" --clobber -R "$GITHUB_REPOSITORY" || true
+          BUNDLE="src-tauri/target/$TARGET/release/bundle"
+          echo "=== Listing bundle tree ==="
+          find "$BUNDLE" -maxdepth 4 \( -name '*.sig' -o -name '*.app.tar.gz' -o -name '*.nsis.zip' -o -name '*.AppImage.tar.gz' \) -print
+
+          arch_suffix=""
+          case "$TARGET" in
+            aarch64-apple-darwin) arch_suffix="aarch64" ;;
+            x86_64-apple-darwin)  arch_suffix="x64" ;;
+          esac
+
+          upload() {
+            local src="$1" name="$2"
+            local tmp
+            tmp=$(mktemp -d)
+            cp "$src" "$tmp/$name"
+            echo "Uploading: $name"
+            gh release upload "$TAG" "$tmp/$name" --clobber -R "$GITHUB_REPOSITORY"
+          }
+
+          # macOS updater archive + sig (rename to include arch)
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if [ -n "$arch_suffix" ]; then
+              upload "$f" "MultiMouse_${arch_suffix}.app.tar.gz"
+            else
+              upload "$f" "$(basename "$f")"
             fi
-          done
+          done < <(find "$BUNDLE" -maxdepth 4 -name '*.app.tar.gz' -not -name '*.sig' -print)
+
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if [ -n "$arch_suffix" ]; then
+              upload "$f" "MultiMouse_${arch_suffix}.app.tar.gz.sig"
+            else
+              upload "$f" "$(basename "$f")"
+            fi
+          done < <(find "$BUNDLE" -maxdepth 4 -name '*.app.tar.gz.sig' -print)
+
+          # Windows NSIS + Linux AppImage updater archives/sigs (already unique names)
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            upload "$f" "$(basename "$f")"
+          done < <(find "$BUNDLE" -maxdepth 4 \
+            \( -name '*.nsis.zip' -o -name '*.nsis.zip.sig' \
+               -o -name '*.AppImage.tar.gz' -o -name '*.AppImage.tar.gz.sig' \) -print)
 
       - name: Upload macOS DMG
         if: runner.os == 'macOS'
@@ -218,8 +248,27 @@ jobs:
 
           mkdir -p sigs
           # Pull every .sig from the release. Each platform job above has
-          # already uploaded its own.
-          gh release download "$TAG" -R "$REPO" -D sigs --pattern "*.sig" --clobber
+          # already uploaded its own. Use the raw API to list assets (more
+          # reliable than `gh release download --pattern` for draft releases)
+          # and curl each .sig into place.
+          RELEASE_ID=$(gh api "repos/$REPO/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          if [ -z "$RELEASE_ID" ]; then
+            echo "No release found for tag $TAG — aborting latest.json generation."
+            exit 1
+          fi
+          gh api "repos/$REPO/releases/$RELEASE_ID/assets" \
+            --jq '.[] | select(.name | endswith(".sig")) | "\(.id) \(.name)"' \
+          | while read -r id name; do
+              echo "Fetching asset $name ($id)"
+              # Asset downloads need the `Accept: application/octet-stream` header.
+              curl -sSL \
+                -H "Accept: application/octet-stream" \
+                -H "Authorization: token $GH_TOKEN" \
+                "https://api.github.com/repos/$REPO/releases/assets/$id" \
+                -o "sigs/$name"
+            done
+          echo "--- downloaded sigs ---"
+          ls -la sigs/ || true
 
           read_sig() {
             # $1 = glob pattern. Print sig contents or empty if missing.
