@@ -11,9 +11,13 @@ use crate::input::inject;
 const DOUBLE_CTRL_MS: u128 = 400;
 /// Throttle mouse-move to ~120 Hz max (8 ms between sends)
 const MOUSE_MOVE_INTERVAL_MS: u128 = 8;
+/// After a release, block edge activation for this long so the cursor has time
+/// to pull away from the edge without immediately re-triggering relay.
+const RELEASE_DEBOUNCE_MS: u128 = 800;
 
 thread_local! {
     static EDGE_FIRST_TOUCH: Cell<Option<Instant>> = Cell::new(None);
+    static LAST_RELEASE: Cell<Option<Instant>> = Cell::new(None);
 }
 
 /// Returns true if `key` is the trigger key for the configured hotkey.
@@ -84,30 +88,20 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
     }
 
     if state.is_relaying() {
-        // Emergency escape hatch: double-Escape (within 600ms) always breaks out,
-        // regardless of the configured hotkey. Users can always recover this way.
+        // Escape = immediate release while relaying. Single-press so users
+        // can always bail out instantly, even when the cursor is stuck.
         if let EventType::KeyPress(rdev::Key::Escape) = &event.event_type {
-            thread_local! {
-                static LAST_ESC: Cell<Option<Instant>> = Cell::new(None);
-            }
-            let now = Instant::now();
-            let double = LAST_ESC.with(|t| {
-                let d = t.get().map(|p| now.duration_since(p).as_millis() < 600).unwrap_or(false);
-                t.set(Some(now));
-                d
-            });
-            if double {
-                state.set_relaying(false);
-                *state.relay_entry.lock() = None;
-                state.send_net(NetCommand::FocusReleased);
-                let monitors = state.monitors.read().clone();
-                let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
-                inject::warp_abs(((min_x + max_x) / 2.0) as i32, ((min_y + max_y) / 2.0) as i32);
-                sync_clipboard_async(state);
-                let _ = app.emit("focus-released", ());
-                tracing::info!("Relay released via emergency double-Esc");
-                return None;
-            }
+            state.set_relaying(false);
+            *state.relay_entry.lock() = None;
+            state.send_net(NetCommand::FocusReleased);
+            let monitors = state.monitors.read().clone();
+            let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
+            inject::warp_abs(((min_x + max_x) / 2.0) as i32, ((min_y + max_y) / 2.0) as i32);
+            sync_clipboard_async(state);
+            LAST_RELEASE.with(|t| t.set(Some(Instant::now())));
+            let _ = app.emit("focus-released", ());
+            tracing::info!("Relay released via Escape");
+            return None;
         }
         if let EventType::KeyPress(key) = &event.event_type {
             let hotkey = state.settings.read().hotkey_release.clone();
@@ -156,6 +150,18 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
             }
         }
 
+        // If this device is currently being CONTROLLED by a peer (state.is_controlled),
+        // Escape key triggers a forced disconnect so the user can grab their mouse back.
+        // We can't send a message back (server-side has no net_tx), so we break the
+        // connection entirely — client will see disconnect and stop sending events.
+        if state.is_controlled() {
+            if let EventType::KeyPress(rdev::Key::Escape) = &event.event_type {
+                tracing::info!("Receiver pressed Escape — signaling disconnect");
+                state.signal_disconnect();
+                return None;
+            }
+        }
+
         if let EventType::MouseMove { x, y } = event.event_type {
             let (edge, dwell_ms, gaming) = {
                 let s = state.settings.read();
@@ -166,7 +172,18 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 return Some(event);
             }
             let monitors = state.monitors.read().clone();
-            let at_edge = layout::is_at_edge(x, y, &edge, &monitors)
+            // Only the CLIENT side (with a net_tx to send messages) should ever
+            // activate relay. Without this guard, the server side would also
+            // enter is_relaying=true, rdev::grab would start consuming events,
+            // and the user's cursor would freeze with nothing being sent anywhere.
+            let can_send = state.net_tx.lock().is_some();
+            // Block re-activation for a short window after a release.
+            let recently_released = LAST_RELEASE.with(|t| {
+                t.get().map(|r| r.elapsed().as_millis() < RELEASE_DEBOUNCE_MS).unwrap_or(false)
+            });
+            let at_edge = can_send
+                && !recently_released
+                && layout::is_at_edge(x, y, &edge, &monitors)
                 && state.connected_peer.lock().is_some();
 
             if at_edge {

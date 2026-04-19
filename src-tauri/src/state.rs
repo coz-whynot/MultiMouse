@@ -152,6 +152,9 @@ pub struct AppState {
     pub session_start: Mutex<Option<std::time::Instant>>,
     /// Last time we observed remote-input activity (used by idle auto-lock)
     pub last_activity: Mutex<std::time::Instant>,
+    /// Notify signal raised when the server should break out of its read loop
+    /// immediately — used to let the receiver kick the controller out via Esc.
+    pub server_disconnect: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -190,7 +193,14 @@ impl AppState {
             bytes_received: std::sync::atomic::AtomicU64::new(0),
             session_start: Mutex::new(None),
             last_activity: Mutex::new(Instant::now()),
+            server_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Kick the server's main read loop — used by the receiver's Esc escape hatch
+    /// to drop the session without needing a reverse channel to the controller.
+    pub fn signal_disconnect(&self) {
+        self.server_disconnect.notify_waiters();
     }
 
     pub fn add_bytes_sent(&self, n: u64) {

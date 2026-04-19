@@ -254,18 +254,24 @@ pub async fn handle_controller(
         *state.remote_screen.lock() = Some((width, height));
     }
 
-    // Single-threaded read loop — NO select! with other branches, because
-    // `read_enc_message` is not cancel-safe: if another branch of a select!
-    // fires mid-read, the partially-read bytes are lost and the next read
-    // returns a corrupted frame → decrypt fails → the entire session drops.
-    // (Active-window polling used to run alongside here; it's been removed
-    // until a proper writer-task architecture exists for the server side.)
+    // Single-threaded read loop — NO select! branch that races with the read,
+    // because `read_enc_message` is not cancel-safe. The *one* exception is
+    // the `server_disconnect` notify: when it fires we break out immediately,
+    // dropping any partially-read frame intentionally (we're closing the
+    // stream anyway so the corruption doesn't matter).
+    let disconnect_signal = state.server_disconnect.clone();
     loop {
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
-            read_enc_message(&mut stream, &mut recv_enc),
-        )
-        .await;
+        let result = tokio::select! {
+            biased;
+            _ = disconnect_signal.notified() => {
+                tracing::info!("Receiver signaled disconnect — closing session from {}", peer_addr);
+                break;
+            }
+            r = tokio::time::timeout(
+                tokio::time::Duration::from_secs(30),
+                read_enc_message(&mut stream, &mut recv_enc),
+            ) => r,
+        };
 
         match result {
             Ok(Some(msg)) => {

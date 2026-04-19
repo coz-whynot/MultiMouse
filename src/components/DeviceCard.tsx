@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion';
+import { invoke } from '@tauri-apps/api/core';
 import { PeerInfo } from '../types';
 
 // TODO: display a "last seen" timestamp for offline/paired-but-absent peers.
@@ -143,14 +144,50 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
 
       {/* Right action */}
       {isConnected ? (
-        <div className="flex-shrink-0 flex items-center gap-1.5">
+        <div className="flex-shrink-0 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
           <motion.div
             className="w-2 h-2 rounded-full"
             animate={{ scale: [1, 1.6, 1], opacity: [1, 0.4, 1] }}
             transition={{ repeat: Infinity, duration: 1.8 }}
             style={{ background: 'var(--accent-secondary)' }}
           />
-          <span className="text-xs font-semibold" style={{ color: 'var(--accent-primary)' }}>Live</span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              invoke('disconnect').catch(console.error);
+            }}
+            className="text-[10px] font-bold px-2 py-1 rounded-lg transition-all active:scale-95"
+            style={{
+              background: 'rgba(239,68,68,0.12)',
+              color: '#f87171',
+              border: '1px solid rgba(239,68,68,0.22)',
+            }}
+            title="End session with this device"
+          >
+            End
+          </button>
+        </div>
+      ) : peer.is_known && peer.status === 'available' ? (
+        <div className="flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onConnect(peer.id);
+            }}
+            className="text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-all active:scale-95 flex items-center gap-1"
+            style={{
+              background: pal.a + '22',
+              color: pal.a,
+              border: `1px solid ${pal.a}40`,
+            }}
+            title="Reconnect to this paired device"
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            Reconnect
+          </button>
         </div>
       ) : isConnecting ? (
         <motion.div
