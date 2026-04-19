@@ -315,7 +315,17 @@ fn inject(enigo: &mut Enigo, event: InputEvent, state: &AppState) {
         }
         InputEvent::Key { key, pressed } => {
             let dir = if pressed { Direction::Press } else { Direction::Release };
-            if let Some(k) = rdev_key_to_enigo(&key) {
+            let mapped = rdev_key_to_enigo(&key);
+            // Diagnostic trace — receiver's inject side. `mapped=false`
+            // means rdev's Debug-format string wasn't in the hand-table
+            // `rdev_key_to_enigo`, so the key was silently dropped.
+            // rdev's Key Debug format is not stable across platforms
+            // (e.g. `KpReturn` falls through to `Return` on Windows,
+            // numpad names change with NumLock state), so mismatches
+            // between sender and receiver mapping tables are a known
+            // failure mode.
+            tracing::debug!("[key] inject {} pressed={} mapped={}", key, pressed, mapped.is_some());
+            if let Some(k) = mapped {
                 let _ = enigo.key(k, dir);
             }
         }

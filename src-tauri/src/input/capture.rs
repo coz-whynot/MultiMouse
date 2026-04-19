@@ -347,6 +347,14 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
 
         if !skip_motion {
             if let Some(ev) = convert_and_remap(&event.event_type, state) {
+                // Diagnostic trace — ship-side of the sender's keyboard
+                // path. Parallels the `[mouse]` traces. `[key]` logs
+                // fire unconditionally (no throttle) since key events
+                // are rare enough to log individually. Mapped success
+                // is logged on the inject side.
+                if let InputEvent::Key { key, pressed } = &ev {
+                    tracing::debug!("[key] ship {} pressed={}", key, pressed);
+                }
                 // Phase 6 held-modifier bookkeeping: remember every
                 // modifier press we ship, so we can send a release burst
                 // if the session ends while the user is still holding
