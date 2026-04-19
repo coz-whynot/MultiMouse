@@ -1,0 +1,49 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4338CA"/>
+      <stop offset="55%" stop-color="#6D28D9"/>
+      <stop offset="100%" stop-color="#9333EA"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="55%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14"/>
+      <feOffset dx="0" dy="14" result="b"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.35"/></feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="1024" height="1024" rx="228" ry="228"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <rect width="1024" height="1024" fill="url(#gloss)"/>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect x="164" y="248" width="508" height="326" rx="36" ry="36"
+          fill="#FFFFFF" fill-opacity="0.30"
+          stroke="#FFFFFF" stroke-opacity="0.60" stroke-width="2.5"/>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect x="360" y="432" width="540" height="348" rx="40" ry="40" fill="#FFFFFF"/>
+  </g>
+
+  <g transform="translate(478 402) scale(6.3)">
+    <path d="M0 0 L0 22 L5.5 17 L8.8 24.5 L11.8 23.2 L8.5 15.7 L15.5 15.7 Z"
+          fill="#1E1B4B"
+          stroke="#FFFFFF"
+          stroke-width="1.6"
+          stroke-linejoin="round"
+          stroke-linecap="round"/>
+  </g>
+</svg>

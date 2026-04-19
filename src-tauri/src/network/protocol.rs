@@ -8,6 +8,10 @@ pub const TRANSFER_PORT: u16 = 57174;
 pub const MULTIMOUSE_SERVICE: &str = "_multimouse._tcp.local.";
 pub const PROTOCOL_VERSION: u32 = 2;
 
+/// Hard cap on clipboard text bytes so a peer can't force us to buffer
+/// unbounded strings. 64 KiB is well beyond typical copy-paste text.
+const CLIPBOARD_TEXT_MAX: usize = 64 * 1024;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data")]
 pub enum Message {
@@ -49,6 +53,13 @@ pub enum Message {
     },
     ActiveWindow {
         app_name: String,
+    },
+    /// Server-sent rejection reason. Sent before the server closes the stream
+    /// on conditions like version mismatch, rate-limit exceeded, or
+    /// already-busy — so the initiator can show a specific error instead of
+    /// just "connection closed".
+    Error {
+        reason: String,
     },
     Bye,
 }
@@ -111,7 +122,7 @@ pub enum NetCommand {
 
 pub async fn read_enc_message<R: AsyncRead + Unpin>(
     reader: &mut R,
-    dec: &Channel,
+    dec: &mut Channel,
 ) -> Option<Message> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await.ok()?;
@@ -120,7 +131,13 @@ pub async fn read_enc_message<R: AsyncRead + Unpin>(
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.ok()?;
     let plain = dec.open(&buf)?;
-    serde_json::from_slice(&plain).ok()
+    let msg: Message = serde_json::from_slice(&plain).ok()?;
+    // Per-type size caps: the outer frame limit is 2 MiB to accommodate
+    // clipboard images, but text-shaped messages should never be that large.
+    match &msg {
+        Message::ClipboardText { text } if text.len() > CLIPBOARD_TEXT_MAX => None,
+        _ => Some(msg),
+    }
 }
 
 pub async fn send_enc_message<W: AsyncWrite + Unpin>(
@@ -129,7 +146,7 @@ pub async fn send_enc_message<W: AsyncWrite + Unpin>(
     enc: &mut Channel,
 ) -> bool {
     let data = match serde_json::to_vec(msg) { Ok(d) => d, Err(_) => return false };
-    let sealed = enc.seal(&data);
+    let sealed = match enc.seal(&data) { Some(s) => s, None => return false };
     let len = sealed.len() as u32;
     if writer.write_all(&len.to_be_bytes()).await.is_err() { return false; }
     writer.write_all(&sealed).await.is_ok()
@@ -137,7 +154,7 @@ pub async fn send_enc_message<W: AsyncWrite + Unpin>(
 
 pub async fn read_enc_transfer_msg<R: AsyncRead + Unpin>(
     reader: &mut R,
-    dec: &Channel,
+    dec: &mut Channel,
 ) -> Option<TransferMessage> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await.ok()?;
@@ -155,7 +172,7 @@ pub async fn send_enc_transfer_msg<W: AsyncWrite + Unpin>(
     enc: &mut Channel,
 ) -> bool {
     let data = match serde_json::to_vec(msg) { Ok(d) => d, Err(_) => return false };
-    let sealed = enc.seal(&data);
+    let sealed = match enc.seal(&data) { Some(s) => s, None => return false };
     let len = sealed.len() as u32;
     if writer.write_all(&len.to_be_bytes()).await.is_err() { return false; }
     writer.write_all(&sealed).await.is_ok()

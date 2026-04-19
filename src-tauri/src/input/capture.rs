@@ -32,6 +32,27 @@ fn is_single_key_release(hotkey: &str) -> bool {
     matches!(hotkey, "caps_lock")
 }
 
+/// Pause/Break toggles gaming mode (edge-cross disabled). Returns true if the
+/// event was the toggle and should be consumed. Persists the new setting on a
+/// background thread so we never block the input pipeline on disk I/O.
+fn try_toggle_gaming_mode(event: &Event, state: &AppState, app: &AppHandle) -> bool {
+    if !matches!(event.event_type, EventType::KeyPress(rdev::Key::Pause)) {
+        return false;
+    }
+    let enabled = {
+        let mut s = state.settings.write();
+        s.gaming_mode = !s.gaming_mode;
+        s.gaming_mode
+    };
+    // Clear any lingering edge-dwell so flipping off mid-game doesn't instantly fire.
+    EDGE_FIRST_TOUCH.with(|t| t.set(None));
+    let snapshot = state.settings.read().clone();
+    std::thread::spawn(move || crate::storage::save_settings(&snapshot));
+    let _ = app.emit("gaming-mode-changed", enabled);
+    tracing::info!("Gaming mode {}", if enabled { "ON" } else { "OFF" });
+    true
+}
+
 pub fn start(app: AppHandle, state: Arc<AppState>) {
     let state_grab = state.clone();
     let app_grab = app.clone();
@@ -47,14 +68,21 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
                            else if cfg!(target_os = "windows") { "windows" }
                            else { "linux" };
             let _ = app.emit("accessibility-needed", serde_json::json!({ "platform": platform }));
+            let app_listen = app.clone();
             let _ = rdev::listen(move |event: Event| {
-                handle_listen(&event, &state);
+                handle_listen(&event, &state, &app_listen);
             });
         }
     });
 }
 
 fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event> {
+    // Global toggle: Pause/Break key flips gaming mode regardless of relay state.
+    // Consumed so games don't receive it.
+    if try_toggle_gaming_mode(&event, state, app) {
+        return None;
+    }
+
     if state.is_relaying() {
         // Emergency escape hatch: double-Escape (within 600ms) always breaks out,
         // regardless of the configured hotkey. Users can always recover this way.
@@ -129,10 +157,14 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
         }
 
         if let EventType::MouseMove { x, y } = event.event_type {
-            let (edge, dwell_ms) = {
+            let (edge, dwell_ms, gaming) = {
                 let s = state.settings.read();
-                (s.transition_edge.clone(), s.edge_dwell_ms as u128)
+                (s.transition_edge.clone(), s.edge_dwell_ms as u128, s.gaming_mode)
             };
+            if gaming {
+                EDGE_FIRST_TOUCH.with(|t| t.set(None));
+                return Some(event);
+            }
             let monitors = state.monitors.read().clone();
             let at_edge = layout::is_at_edge(x, y, &edge, &monitors)
                 && state.connected_peer.lock().is_some();
@@ -177,7 +209,13 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
     }
 }
 
-fn handle_listen(event: &Event, state: &AppState) {
+fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
+    // Observe-only path: we can't consume the Pause key, so the game will also
+    // see it. Toggle still fires so the UI/tray reflects the correct state.
+    if try_toggle_gaming_mode(event, state, app) {
+        return;
+    }
+
     if state.is_relaying() {
         if let EventType::KeyPress(key) = &event.event_type {
             let hotkey = state.settings.read().hotkey_release.clone();
@@ -222,10 +260,14 @@ fn handle_listen(event: &Event, state: &AppState) {
         }
 
         if let EventType::MouseMove { x, y } = event.event_type {
-            let (edge, dwell_ms) = {
+            let (edge, dwell_ms, gaming) = {
                 let s = state.settings.read();
-                (s.transition_edge.clone(), s.edge_dwell_ms as u128)
+                (s.transition_edge.clone(), s.edge_dwell_ms as u128, s.gaming_mode)
             };
+            if gaming {
+                EDGE_FIRST_TOUCH.with(|t| t.set(None));
+                return;
+            }
             let monitors = state.monitors.read().clone();
             let at_edge = layout::is_at_edge(x, y, &edge, &monitors)
                 && state.connected_peer.lock().is_some();

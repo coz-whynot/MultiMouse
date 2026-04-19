@@ -33,6 +33,8 @@ export interface Settings {
   onboarding_done: boolean;
   auto_reconnect: boolean;
   idle_lock_minutes: number;
+  privacy_blur_on_relay: boolean;
+  gaming_mode: boolean;
 }
 
 export interface PairingRequest {

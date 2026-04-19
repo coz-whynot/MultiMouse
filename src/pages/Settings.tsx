@@ -391,6 +391,14 @@ export const SettingsPage = () => {
             onChange={(v) => update({ auto_reconnect: v })}
           />
         </Row>
+        <Row>
+          <Toggle
+            label="Privacy blur while controlling"
+            description="Blur this window when your cursor is driving a remote device so onlookers can't see the other screen's reflection"
+            checked={settings.privacy_blur_on_relay ?? true}
+            onChange={(v) => update({ privacy_blur_on_relay: v })}
+          />
+        </Row>
         <Row noDivider>
           <div className="flex items-center justify-between gap-4">
             <div className="flex-1 min-w-0">
@@ -514,6 +522,14 @@ export const SettingsPage = () => {
           </svg>
         }
       >
+        <Row>
+          <Toggle
+            label="Gaming mode"
+            description="Disable edge-cross so a hard flick to the edge mid-match won't yank the cursor to the other computer. Hotkey release still works. Toggle with Pause/Break."
+            checked={settings.gaming_mode ?? false}
+            onChange={(v) => update({ gaming_mode: v })}
+          />
+        </Row>
         <Row noDivider>
           <div className="flex items-start justify-between gap-4 mb-3">
             <div className="flex-1 min-w-0">

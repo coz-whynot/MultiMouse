@@ -13,29 +13,54 @@ const NONCE_LEN: usize = 12;
 pub struct Channel {
     cipher: ChaCha20Poly1305,
     nonce_ctr: u64,
+    /// Highest inbound counter we've accepted. Messages with a counter <= this
+    /// are rejected to defeat replay: the underlying TCP stream is ordered, so
+    /// the sender's counter arrives strictly monotonically.
+    last_recv_ctr: Option<u64>,
 }
 
 impl Channel {
     fn new(key: [u8; 32]) -> Self {
-        Self { cipher: ChaCha20Poly1305::new(Key::from_slice(&key)), nonce_ctr: 0 }
+        Self {
+            cipher: ChaCha20Poly1305::new(Key::from_slice(&key)),
+            nonce_ctr: 0,
+            last_recv_ctr: None,
+        }
     }
 
     /// Encrypt plaintext. Output = 12-byte-nonce + ciphertext + 16-byte-tag.
-    pub fn seal(&mut self, plaintext: &[u8]) -> Vec<u8> {
+    /// Returns None on the pathological AEAD failure (plaintext larger than
+    /// ~256 GiB); callers drop the message rather than panic the io task.
+    pub fn seal(&mut self, plaintext: &[u8]) -> Option<Vec<u8>> {
         let mut nonce_bytes = [0u8; NONCE_LEN];
         nonce_bytes[..8].copy_from_slice(&self.nonce_ctr.to_le_bytes());
         self.nonce_ctr += 1;
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let mut out = nonce_bytes.to_vec();
-        out.extend(self.cipher.encrypt(nonce, plaintext).expect("encrypt"));
-        out
+        let ct = self.cipher.encrypt(nonce, plaintext).ok()?;
+        let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ct);
+        Some(out)
     }
 
     /// Decrypt. Input must be nonce(12) + ciphertext + tag(16).
-    pub fn open(&self, data: &[u8]) -> Option<Vec<u8>> {
+    /// Rejects any message whose counter is not strictly greater than the
+    /// last accepted one — this prevents an attacker from replaying captured
+    /// ciphertext back at us (e.g. a recorded MouseClick).
+    pub fn open(&mut self, data: &[u8]) -> Option<Vec<u8>> {
         if data.len() < NONCE_LEN { return None; }
         let nonce = Nonce::from_slice(&data[..NONCE_LEN]);
-        self.cipher.decrypt(nonce, &data[NONCE_LEN..]).ok()
+
+        let mut ctr_bytes = [0u8; 8];
+        ctr_bytes.copy_from_slice(&data[..8]);
+        let ctr = u64::from_le_bytes(ctr_bytes);
+        if let Some(last) = self.last_recv_ctr {
+            if ctr <= last { return None; }
+        }
+
+        let plain = self.cipher.decrypt(nonce, &data[NONCE_LEN..]).ok()?;
+        self.last_recv_ctr = Some(ctr);
+        Some(plain)
     }
 }
 
@@ -43,8 +68,10 @@ fn derive_pair(shared: &[u8]) -> ([u8; 32], [u8; 32]) {
     let hk = Hkdf::<Sha256>::new(None, shared);
     let mut c2s = [0u8; 32];
     let mut s2c = [0u8; 32];
-    hk.expand(b"multimouse-c2s-v2", &mut c2s).unwrap();
-    hk.expand(b"multimouse-s2c-v2", &mut s2c).unwrap();
+    // HKDF-Expand fails only when output length > 255 * HashLen; 32 bytes is
+    // trivially within spec, so these calls are infallible by construction.
+    hk.expand(b"multimouse-c2s-v2", &mut c2s).expect("HKDF 32 bytes within spec");
+    hk.expand(b"multimouse-s2c-v2", &mut s2c).expect("HKDF 32 bytes within spec");
     (c2s, s2c)
 }
 
@@ -54,7 +81,7 @@ fn derive_pair(shared: &[u8]) -> ([u8; 32], [u8; 32]) {
 fn derive_sas(shared: &[u8]) -> String {
     let hk = Hkdf::<Sha256>::new(None, shared);
     let mut bytes = [0u8; 4];
-    hk.expand(b"multimouse-sas-v1", &mut bytes).unwrap();
+    hk.expand(b"multimouse-sas-v1", &mut bytes).expect("HKDF 4 bytes within spec");
     let n = u32::from_be_bytes(bytes) % 1_000_000;
     format!("{:06}", n)
 }

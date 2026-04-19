@@ -37,6 +37,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check version consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          pj=$(node -p "require('./package.json').version")
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo=$(grep -E '^version\s*=' src-tauri/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "package.json=$pj  tauri.conf.json=$conf  Cargo.toml=$cargo"
+          if [ "$pj" != "$conf" ] || [ "$pj" != "$cargo" ]; then
+            echo "::error::Versions must match across package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml"
+            exit 1
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

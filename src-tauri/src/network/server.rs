@@ -4,6 +4,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tauri::{AppHandle, Emitter};
 use rand::Rng;
+use subtle::ConstantTimeEq;
 
 use crate::state::{AppState, PeerStatus};
 use crate::network::protocol::{
@@ -33,14 +34,24 @@ pub async fn start_server(app: AppHandle, state: Arc<AppState>) {
                 let state = state.clone();
 
                 let ip = peer_addr.ip().to_string();
-                {
+                let rate_limited = {
                     let mut counts = state.connection_count.lock();
                     let count = counts.entry(ip.clone()).or_insert(0);
                     if *count >= 5 {
                         tracing::warn!("Rate limit: too many connections from {}", ip);
-                        continue;
+                        true
+                    } else {
+                        *count += 1;
+                        false
                     }
-                    *count += 1;
+                };
+                if rate_limited {
+                    // Drop the stream before handshake; client sees a fast
+                    // "connection failed" rather than hanging on read. A more
+                    // specific message would require handshaking first, which
+                    // itself costs a task slot we're trying to protect.
+                    drop(stream);
+                    continue;
                 }
 
                 let state_cleanup = state.clone();
@@ -83,15 +94,20 @@ pub async fn handle_controller(
             return;
         }
     };
-    let (mut send_enc, recv_enc, sas_pin) = (hs.send, hs.recv, hs.sas);
+    let (mut send_enc, mut recv_enc, sas_pin) = (hs.send, hs.recv, hs.sas);
 
     // Reject if already connected (dual-user guard)
     if state.connected_peer.lock().is_some() {
         tracing::warn!("Rejecting connection from {} — already connected", peer_addr);
+        send_enc_message(
+            &mut stream,
+            &Message::Error { reason: "Host is already paired with another device".into() },
+            &mut send_enc,
+        ).await;
         return;
     }
 
-    let msg = match read_enc_message(&mut stream, &recv_enc).await {
+    let msg = match read_enc_message(&mut stream, &mut recv_enc).await {
         Some(m) => m,
         None => return,
     };
@@ -106,14 +122,18 @@ pub async fn handle_controller(
             "Protocol version mismatch: peer {} sent v{}, we support v{}",
             peer_id, peer_version, crate::network::protocol::PROTOCOL_VERSION
         );
+        let reason = format!(
+            "Incompatible version (peer uses v{}, we use v{})",
+            peer_version, crate::network::protocol::PROTOCOL_VERSION
+        );
+        send_enc_message(
+            &mut stream,
+            &Message::Error { reason: reason.clone() },
+            &mut send_enc,
+        ).await;
         let _ = app.emit(
             "connection-failed",
-            serde_json::json!({
-                "error": format!(
-                    "Incompatible version (peer uses v{}, we use v{})",
-                    peer_version, crate::network::protocol::PROTOCOL_VERSION
-                )
-            }),
+            serde_json::json!({ "error": reason }),
         );
         return;
     }
@@ -124,14 +144,16 @@ pub async fn handle_controller(
         String::new()
     };
 
-    let auth_msg = match read_enc_message(&mut stream, &recv_enc).await {
+    let auth_msg = match read_enc_message(&mut stream, &mut recv_enc).await {
         Some(m) => m,
         None => return,
     };
 
     let (authenticated, new_session_key) = match auth_msg {
         Message::SessionAuth { key } => {
-            let ok = storage::get_session_key(&peer_id).as_deref() == Some(&key);
+            let ok = storage::get_session_key(&peer_id)
+                .map(|stored| stored.as_bytes().ct_eq(key.as_bytes()).into())
+                .unwrap_or(false);
             (ok, None)
         }
         Message::PinRequest { .. } => {
@@ -228,7 +250,7 @@ pub async fn handle_controller(
 
     // Receive the controller's screen size so we can scale its mouse coordinates
     // to our local coordinate space (fixes cursor jumps on mixed-DPI setups).
-    if let Some(Message::ScreenSize { width, height }) = read_enc_message(&mut stream, &recv_enc).await {
+    if let Some(Message::ScreenSize { width, height }) = read_enc_message(&mut stream, &mut recv_enc).await {
         *state.remote_screen.lock() = Some((width, height));
     }
 
@@ -254,7 +276,7 @@ pub async fn handle_controller(
             }
             result = tokio::time::timeout(
                 tokio::time::Duration::from_secs(15),
-                read_enc_message(&mut stream, &recv_enc),
+                read_enc_message(&mut stream, &mut recv_enc),
             ) => {
                 match result {
                     Ok(Some(msg)) => {

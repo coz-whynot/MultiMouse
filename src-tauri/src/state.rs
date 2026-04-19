@@ -15,6 +15,23 @@ pub struct PeerInfo {
     pub status: PeerStatus,
     pub ping_ms: Option<u32>,
     pub is_known: bool,
+    /// Unix seconds of last mDNS resolve. Used to expire peers that drop off the
+    /// network without sending a ServiceRemoved event (common on flaky Wi-Fi).
+    #[serde(default = "unix_now")]
+    pub last_seen: i64,
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Drop entries not seen in the last 15 minutes, unless currently connected.
+pub fn prune_stale_peers(peers: &mut Vec<PeerInfo>) {
+    let cutoff = unix_now() - 15 * 60;
+    peers.retain(|p| p.status == PeerStatus::Connected || p.last_seen >= cutoff);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -41,10 +58,15 @@ pub struct Settings {
     pub auto_reconnect: bool,
     #[serde(default)]
     pub idle_lock_minutes: u32,
+    #[serde(default = "default_privacy_blur")]
+    pub privacy_blur_on_relay: bool,
+    #[serde(default)]
+    pub gaming_mode: bool,
 }
 
 fn default_edge_dwell_ms() -> u32 { 150 }
 fn default_auto_reconnect() -> bool { true }
+fn default_privacy_blur() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -58,6 +80,8 @@ impl Default for Settings {
             onboarding_done: false,
             auto_reconnect: true,
             idle_lock_minutes: 0,
+            privacy_blur_on_relay: true,
+            gaming_mode: false,
         }
     }
 }

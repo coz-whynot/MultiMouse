@@ -71,7 +71,7 @@ pub async fn connect_stream(
             return;
         }
     };
-    let (mut send_enc, recv_enc, sas_pin) = (hs.send, hs.recv, hs.sas);
+    let (mut send_enc, mut recv_enc, sas_pin) = (hs.send, hs.recv, hs.sas);
 
     send_enc_message(
         &mut stream,
@@ -86,8 +86,16 @@ pub async fn connect_stream(
 
     if let Some(key) = session_key {
         send_enc_message(&mut stream, &Message::SessionAuth { key }, &mut send_enc).await;
-        match read_enc_message(&mut stream, &recv_enc).await {
+        match read_enc_message(&mut stream, &mut recv_enc).await {
             Some(Message::PinResponse { accepted: true, .. }) => {}
+            Some(Message::Error { reason }) => {
+                reset_peer_status(&state, &peer.id);
+                let _ = app.emit(
+                    "connection-failed",
+                    serde_json::json!({ "peer_id": peer.id, "error": reason }),
+                );
+                return;
+            }
             _ => {
                 reset_peer_status(&state, &peer.id);
                 let _ = app.emit("pin-rejected", &peer.id);
@@ -105,7 +113,7 @@ pub async fn connect_stream(
 
         send_enc_message(&mut stream, &Message::PinRequest { pin }, &mut send_enc).await;
 
-        match read_enc_message(&mut stream, &recv_enc).await {
+        match read_enc_message(&mut stream, &mut recv_enc).await {
             Some(Message::PinResponse { accepted: true, session_key }) => {
                 if let Some(key) = session_key {
                     // Skip persistence for relay peers (empty addr) — they require a fresh code each session
@@ -113,6 +121,14 @@ pub async fn connect_stream(
                         storage::save_device(&peer.id, &peer.name, &peer.addr, peer.port, &key);
                     }
                 }
+            }
+            Some(Message::Error { reason }) => {
+                reset_peer_status(&state, &peer.id);
+                let _ = app.emit(
+                    "connection-failed",
+                    serde_json::json!({ "peer_id": peer.id, "error": reason }),
+                );
+                return;
             }
             _ => {
                 reset_peer_status(&state, &peer.id);
@@ -123,7 +139,7 @@ pub async fn connect_stream(
     }
 
     // Read server's screen size and store it for coordinate normalization
-    if let Some(Message::ScreenSize { width, height }) = read_enc_message(&mut stream, &recv_enc).await {
+    if let Some(Message::ScreenSize { width, height }) = read_enc_message(&mut stream, &mut recv_enc).await {
         *state.remote_screen.lock() = Some((width, height));
     }
 
@@ -202,7 +218,7 @@ pub async fn connect_stream(
                     .as_millis() as u64;
                 state_ping.send_net(NetCommand::Ping(ts));
             }
-            result = read_enc_message(&mut reader, &recv_enc) => {
+            result = read_enc_message(&mut reader, &mut recv_enc) => {
                 match result {
                     Some(msg) => {
                         if let Ok(data) = serde_json::to_vec(&msg) {

@@ -149,6 +149,11 @@ export default function App() {
           // ignore malformed deep-link URLs
         }
       }),
+      listen<boolean>('gaming-mode-changed', (e) => {
+        const enabled = !!e.payload;
+        const current = useStore.getState().settings;
+        if (current) setSettings({ ...current, gaming_mode: enabled });
+      }),
       listen('idle-lock-triggered', () => {
         const mins = useStore.getState().settings?.idle_lock_minutes ?? 0;
         setIdleLockMsg(
@@ -199,8 +204,7 @@ export default function App() {
   const rootBorder = isLight ? '1px solid rgba(79,70,229,0.22)' : '1px solid rgba(99,102,241,0.16)';
 
   // FEATURE 2: Privacy blur while we're actively controlling a peer.
-  // TODO: expose a `privacy_blur_on_relay` setting once the backend adds it.
-  const privacyBlurOn = true;
+  const privacyBlurOn = settings?.privacy_blur_on_relay !== false;
   const relaying = status?.relaying === true;
   const isControlled = status?.is_controlled === true;
   const blurContent = privacyBlurOn && relaying;
@@ -215,17 +219,10 @@ export default function App() {
   const handleReleaseControl = () => invoke('release_cursor').catch(() => {});
 
   const handleAcceptDeepLink = async (link: IncomingDeepLink) => {
-    // Best-effort: forward the pairing host + code to the backend. Exact
-    // command name is up to the backend agent; we try a couple of shapes and
-    // always clear the modal so the UI doesn't get stuck.
     try {
-      await invoke('connect_to_host', { host: link.host, code: link.code });
-    } catch {
-      try {
-        await invoke('connect_to_device', { peerId: link.host, pin: link.code });
-      } catch (e) {
-        console.warn('deep-link connect failed', e);
-      }
+      await invoke('connect_to_device', { peerId: link.host, pin: link.code });
+    } catch (e) {
+      console.warn('deep-link connect failed', e);
     }
     setIncomingDeepLink(null);
     setPage('home');

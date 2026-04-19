@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tauri::{AppHandle, Emitter};
-use crate::state::{AppState, PeerInfo, PeerStatus};
+use crate::state::{prune_stale_peers, AppState, PeerInfo, PeerStatus};
 use crate::network::protocol::{MULTIMOUSE_PORT, MULTIMOUSE_SERVICE};
 
 pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
@@ -81,6 +81,10 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                     .replace('_', " ")
                     .to_string();
 
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
                 let peer = PeerInfo {
                     id: peer_id.clone(),
                     name,
@@ -89,15 +93,18 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                     status: PeerStatus::Available,
                     ping_ms: None,
                     is_known: false,
+                    last_seen: now_unix,
                 };
 
                 let mut peers = state.peers.lock();
                 if let Some(existing) = peers.iter_mut().find(|p| p.id == peer_id) {
                     existing.addr = peer.addr.clone();
                     existing.port = peer.port;
+                    existing.last_seen = now_unix;
                 } else {
                     peers.push(peer);
                 }
+                prune_stale_peers(&mut peers);
                 drop(peers);
                 let _ = app.emit("peers-updated", ());
             }

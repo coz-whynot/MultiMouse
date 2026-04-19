@@ -157,14 +157,21 @@ pub async fn update_settings(
     state: State<'_, Arc<AppState>>,
     settings: Settings,
 ) -> Result<(), String> {
+    // Snapshot the old launch-startup flag under a short read lock, then drop it
+    // before doing any disk I/O. Previously we held the write lock across the
+    // file write, which blocked every concurrent reader (get_settings, relay
+    // setup, etc.) for the duration of the rename.
     let old_startup = state.settings.read().launch_on_startup;
     let new_startup = settings.launch_on_startup;
 
-    // Persist to disk first
-    storage::save_settings(&settings);
-    *state.settings.write() = settings;
+    {
+        let mut w = state.settings.write();
+        *w = settings.clone();
+    }
 
-    // Apply launch-on-startup change if toggled
+    // I/O happens with no lock held.
+    storage::save_settings(&settings);
+
     if new_startup != old_startup {
         apply_autolaunch(new_startup);
     }

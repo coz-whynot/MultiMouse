@@ -129,6 +129,10 @@ pub async fn join_session(
     }
 
     // Placeholder peer — name/addr updated after Hello exchange in connect_stream
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let peer = PeerInfo {
         id: format!("relay-{}", code.trim().to_uppercase()),
         name: "Internet Device".to_string(),
@@ -137,6 +141,7 @@ pub async fn join_session(
         status: PeerStatus::Available,
         ping_ms: None,
         is_known: false,
+        last_seen: now_unix,
     };
 
     crate::network::client::connect_stream(app, state, stream, peer, pin, None).await;

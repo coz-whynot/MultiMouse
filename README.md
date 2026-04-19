@@ -34,9 +34,16 @@ Grab the latest installer from the [Releases page](https://github.com/coz-whynot
 
 ### First-run setup
 
-- **macOS** — Open the DMG, drag MultiMouse to Applications. On first launch, grant access in **System Settings → Privacy & Security → Accessibility** and **Input Monitoring**.
+- **macOS** — Open the DMG, drag MultiMouse to Applications.
+  - Because MultiMouse is not notarized by Apple, Gatekeeper will refuse to open it on first launch ("Apple could not verify…"). To allow it:
+    - **Easiest:** right-click `MultiMouse.app` in Applications → **Open** → click **Open** in the dialog. You only have to do this once.
+    - **Or, from Terminal:** `xattr -dr com.apple.quarantine /Applications/MultiMouse.app`
+  - Then grant access in **System Settings → Privacy & Security → Accessibility** and **Input Monitoring** when the app prompts.
 - **Windows** — Run the installer. SmartScreen may warn on first run; click **More info → Run anyway**.
-- **Linux** — `chmod +x MultiMouse_*.AppImage && ./MultiMouse_*.AppImage`. Requires `libwebkit2gtk-4.1`, `libayatana-appindicator3`, and `libxdo`.
+- **Linux** — `chmod +x MultiMouse_*.AppImage && ./MultiMouse_*.AppImage`. Requires `libwebkit2gtk-4.1`, `libayatana-appindicator3`, `libxdo`, and **FUSE 2** (AppImage won't mount without it):
+  - Ubuntu / Debian: `sudo apt install libfuse2`
+  - Fedora: `sudo dnf install fuse fuse-libs`
+  - Arch: `sudo pacman -S fuse2`
 
 ## How it works
 

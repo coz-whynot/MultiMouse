@@ -64,9 +64,10 @@ pub fn run() {
             let show = MenuItemBuilder::with_id("show", "Show MultiMouse").build(app)?;
             let release = MenuItemBuilder::with_id("release", "Release Control (⎋)").build(app)?;
             let disconnect = MenuItemBuilder::with_id("disconnect", "Disconnect").build(app)?;
+            let gaming = MenuItemBuilder::with_id("gaming", "Toggle Gaming Mode (Pause)").build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-            let menu = Menu::with_items(app, &[&show, &release, &disconnect, &sep, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &release, &disconnect, &gaming, &sep, &quit])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -80,6 +81,7 @@ pub fn run() {
                     "show" => show_window(app),
                     "release" => emergency_release(app),
                     "disconnect" => emergency_disconnect(app),
+                    "gaming" => toggle_gaming_mode(app),
                     "quit" => {
                         shutdown_services(app);
                         std::process::exit(0);
@@ -190,7 +192,17 @@ pub fn run() {
             commands::get_bandwidth,
             commands::get_audit_log,
             commands::clear_audit_log,
+            hide_window,
         ])
+        .on_window_event(|window, event| {
+            // Intercept the native close (Cmd+W, Cmd+Q window, OS-level close)
+            // and hide to tray instead of quitting. The only path to a real
+            // exit is the tray "Quit" menu item.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                hide_to_tray(window.app_handle());
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running MultiMouse");
 }
@@ -251,6 +263,23 @@ fn show_window(app: &AppHandle) {
     }
 }
 
+/// Hide the window back to the tray. On macOS this also flips the activation
+/// policy back to Accessory so the app disappears from the dock.
+fn hide_to_tray(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+}
+
+#[tauri::command]
+fn hide_window(app: AppHandle) {
+    hide_to_tray(&app);
+}
+
 /// Tray-menu "Release Control" — stops input forwarding and returns cursor to
 /// this machine. Works even when the mouse is stuck relaying to the remote.
 fn emergency_release(app: &AppHandle) {
@@ -267,6 +296,22 @@ fn emergency_release(app: &AppHandle) {
         input::inject::warp_abs(cx, cy);
         let _ = app.emit("focus-released", ());
         tracing::info!("Emergency release from tray");
+    }
+}
+
+/// Tray-menu "Toggle Gaming Mode" — flips the same flag Pause/Break toggles.
+/// Keeps edge-cross from firing mid-match. Persists and notifies the frontend.
+fn toggle_gaming_mode(app: &AppHandle) {
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        let enabled = {
+            let mut s = state.settings.write();
+            s.gaming_mode = !s.gaming_mode;
+            s.gaming_mode
+        };
+        let snapshot = state.settings.read().clone();
+        std::thread::spawn(move || storage::save_settings(&snapshot));
+        let _ = app.emit("gaming-mode-changed", enabled);
+        tracing::info!("Gaming mode {} (tray)", if enabled { "ON" } else { "OFF" });
     }
 }
 

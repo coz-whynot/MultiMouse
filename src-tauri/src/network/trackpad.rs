@@ -6,6 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -155,11 +156,17 @@ async fn handle_connection(
 
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
 
-    // Token check (either /?t=TOKEN or /ws?t=TOKEN)
+    // Token check (either /?t=TOKEN or /ws?t=TOKEN). Constant-time compare:
+    // an attacker probing the LAN must not be able to brute-force the token
+    // byte-by-byte via response-timing differences.
     let expected = state.trackpad_token.lock().clone();
-    let token_ok = expected
-        .as_deref()
-        .is_some_and(|tok| query.split('&').any(|kv| kv == format!("t={tok}")));
+    let token_ok = match expected.as_deref() {
+        None => false,
+        Some(tok) => query
+            .split('&')
+            .filter_map(|kv| kv.strip_prefix("t="))
+            .any(|supplied| supplied.as_bytes().ct_eq(tok.as_bytes()).into()),
+    };
 
     // Find Sec-WebSocket-Key + detect Upgrade
     let mut is_upgrade = false;
@@ -231,12 +238,50 @@ async fn handle_ws(mut ws: WebSocketStream<TcpStream>, state: Arc<AppState>, app
     let welcome = serde_json::json!({ "type": "welcome", "device_name": state.device_name });
     let _ = ws.send(Message::Text(welcome.to_string())).await;
 
+    // Per-connection throttle: cap move/scroll at ~240 Hz (≈4 ms between events)
+    // and coalesce deltas within a window so a misbehaving phone can't flood
+    // `inject::inject_move_rel` faster than the OS can process it.
+    const MIN_MOTION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
+    let mut last_motion = std::time::Instant::now()
+        .checked_sub(MIN_MOTION_INTERVAL)
+        .unwrap_or_else(std::time::Instant::now);
+    let mut pending_move_dx: i32 = 0;
+    let mut pending_move_dy: i32 = 0;
+    let mut pending_scroll_dx: i32 = 0;
+    let mut pending_scroll_dy: i32 = 0;
+
     while let Some(msg) = ws.next().await {
         let msg = match msg { Ok(m) => m, Err(_) => break };
         match msg {
             Message::Text(text) => {
                 if let Ok(parsed) = serde_json::from_str::<PhoneMsg>(&text) {
-                    dispatch(parsed);
+                    match parsed {
+                        PhoneMsg::Move { dx, dy } => {
+                            pending_move_dx = pending_move_dx.saturating_add(dx);
+                            pending_move_dy = pending_move_dy.saturating_add(dy);
+                            if last_motion.elapsed() >= MIN_MOTION_INTERVAL {
+                                if pending_move_dx != 0 || pending_move_dy != 0 {
+                                    inject::inject_move_rel(pending_move_dx, pending_move_dy);
+                                    pending_move_dx = 0;
+                                    pending_move_dy = 0;
+                                }
+                                last_motion = std::time::Instant::now();
+                            }
+                        }
+                        PhoneMsg::Scroll { dx, dy } => {
+                            pending_scroll_dx = pending_scroll_dx.saturating_add(dx);
+                            pending_scroll_dy = pending_scroll_dy.saturating_add(dy);
+                            if last_motion.elapsed() >= MIN_MOTION_INTERVAL {
+                                if pending_scroll_dx != 0 || pending_scroll_dy != 0 {
+                                    inject::inject_scroll(pending_scroll_dx, pending_scroll_dy);
+                                    pending_scroll_dx = 0;
+                                    pending_scroll_dy = 0;
+                                }
+                                last_motion = std::time::Instant::now();
+                            }
+                        }
+                        other => dispatch(other),
+                    }
                 }
             }
             Message::Ping(data) => { let _ = ws.send(Message::Pong(data)).await; }

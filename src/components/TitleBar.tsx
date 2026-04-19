@@ -1,7 +1,10 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 
 export const TitleBar = () => {
-  const close = () => getCurrentWindow().hide();
+  // Use the Rust `hide_window` command so the activation-policy flip (macOS
+  // Regular → Accessory) happens in sync with the window hiding. Calling
+  // getCurrentWindow().hide() directly leaves the app showing in the dock.
+  const close = () => invoke('hide_window').catch(() => {});
 
   return (
     <div
