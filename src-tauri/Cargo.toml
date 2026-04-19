@@ -1,6 +1,6 @@
 [package]
 name = "multimouse"
-version = "0.2.4"
+version = "0.2.5"
 description = "Share mouse and keyboard across devices"
 authors = ["MultiMouse Contributors"]
 license = "MIT"

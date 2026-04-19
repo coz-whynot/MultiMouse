@@ -5,6 +5,9 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:default"
+    "shell:default",
+    "updater:default",
+    "process:default",
+    "deep-link:default"
   ]
 }
