@@ -22,7 +22,13 @@ tauri-plugin-deep-link = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-rdev = { version = "0.5", features = ["unstable_grab"] }
+# Using fufesou's rdev fork: upstream 0.5.3 calls TSMGetInputSourceProperty
+# from rdev's CGEventTap background thread on macOS, which trips Apple's
+# _dispatch_assert_queue_fail — crashes the process on every incoming key
+# event. This fork drops the string_from_code path (which we don't use —
+# we only need the event_type, not the translated string) and exposes grab
+# unconditionally (no feature flag needed).
+rdev = { git = "https://github.com/fufesou/rdev", rev = "a90dbe11" }
 enigo = "0.2"
 mdns-sd = "0.11"
 uuid = { version = "1", features = ["v4", "serde"] }
