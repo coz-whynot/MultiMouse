@@ -165,6 +165,12 @@ pub struct AppState {
     /// Notify signal raised when the server should break out of its read loop
     /// immediately — used to let the receiver kick the controller out via Esc.
     pub server_disconnect: std::sync::Arc<tokio::sync::Notify>,
+    /// Per-peer-id cooldown timestamps. When the receiver kicks a controller
+    /// (Esc or native user input), the controller's peer_id is put in cooldown
+    /// for ~30s; server rejects any reconnect attempts from that peer_id until
+    /// it expires. This gives the local user a protected window to use their
+    /// own mouse without getting instantly re-locked by auto-reconnect.
+    pub peer_cooldowns: Mutex<HashMap<String, Instant>>,
     /// Timestamp of the first edge touch for dwell-based relay activation.
     /// Moved off a thread-local so it can be cleared on every disconnect; a
     /// stale value after reconnect was causing instant-activate or missed-dwell.
@@ -225,10 +231,28 @@ impl AppState {
             session_start: Mutex::new(None),
             last_activity: Mutex::new(Instant::now()),
             server_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
+            peer_cooldowns: Mutex::new(HashMap::new()),
             edge_first_touch: Mutex::new(None),
             last_release: Mutex::new(None),
             clipboard_tx: Mutex::new(None),
         }
+    }
+
+    /// Record that the receiver just kicked this peer (Esc or native user
+    /// input). Any reconnect attempts from the same peer_id will be rejected
+    /// for the next 30s so the local user gets an un-locked mouse window.
+    pub fn mark_peer_kicked(&self, peer_id: &str) {
+        let until = Instant::now() + std::time::Duration::from_secs(30);
+        self.peer_cooldowns.lock().insert(peer_id.to_string(), until);
+    }
+
+    /// True if `peer_id` is still in the kick cooldown window.
+    pub fn is_peer_in_cooldown(&self, peer_id: &str) -> bool {
+        let mut guard = self.peer_cooldowns.lock();
+        // Garbage-collect expired entries lazily on each check.
+        let now = Instant::now();
+        guard.retain(|_, until| *until > now);
+        guard.get(peer_id).map(|u| *u > now).unwrap_or(false)
     }
 
     /// Reset the edge-dwell and release-debounce timers. MUST be called on

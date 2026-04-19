@@ -178,6 +178,12 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 _ => false,
             };
             if is_user_input {
+                // Mark the currently-connected peer so it can't auto-reconnect
+                // and re-lock the mouse within 30s. Kicking without cooldown
+                // loses the race against aggressive client auto-reconnect.
+                if let Some(pid) = state.connected_peer.lock().clone() {
+                    state.mark_peer_kicked(&pid);
+                }
                 state.signal_disconnect();
                 return None;
             }

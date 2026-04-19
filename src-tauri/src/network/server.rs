@@ -178,6 +178,23 @@ pub async fn handle_controller(
         }
     };
 
+    // Post-kick cooldown: if the local user just signalled "I want my mouse
+    // back" by pressing a key or clicking, the controller's peer_id is held
+    // in cooldown for ~30s. Aggressive auto-reconnect would otherwise re-lock
+    // the mouse within 2s and defeat the takeback.
+    if state.is_peer_in_cooldown(&peer_id) {
+        tracing::info!("Rejecting reconnect from {} — in post-kick cooldown", peer_id);
+        send_enc_message(
+            &mut stream,
+            &Message::Error {
+                reason: "Local user is using this device — please wait a few seconds".into(),
+            },
+            &mut send_enc,
+        ).await;
+        clear_pending_if_ours(&state);
+        return;
+    }
+
     if peer_version != crate::network::protocol::PROTOCOL_VERSION {
         tracing::warn!(
             "Protocol version mismatch: peer {} sent v{}, we support v{}",
