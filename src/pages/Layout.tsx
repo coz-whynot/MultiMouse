@@ -13,110 +13,182 @@ function formatUptime(s: number) {
   return `${m}m ${sec < 10 ? '0' : ''}${sec}s`;
 }
 
-/* ── Monitor SVG shapes ── */
-const MonitorShape = ({
-  label,
-  color,
-  size = 'md',
+
+/* ── Drag-to-arrange canvas (ShareMouse / macOS-Displays style) ──
+   Local monitor is fixed in the center of a canvas. The remote monitor
+   starts on the configured edge and can be dragged to any of the 4 sides;
+   on release, it snaps to the nearest edge and saves to settings. */
+const ArrangementCanvas = ({
+  localName,
+  localScreen,
+  remoteName,
+  remoteScreen,
+  edge,
+  onEdge,
 }: {
-  label: string;
-  color: string;
-  size?: 'sm' | 'md' | 'lg';
+  localName: string;
+  localScreen?: { width: number; height: number };
+  remoteName?: string;
+  remoteScreen?: { width: number; height: number };
+  edge: Edge;
+  onEdge: (e: Edge) => void;
 }) => {
-  const w = size === 'sm' ? 56 : size === 'lg' ? 88 : 72;
-  const h = size === 'sm' ? 36 : size === 'lg' ? 56 : 48;
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const CANVAS_W = 360;
+  const CANVAS_H = 220;
+
+  // Compute monitor display dimensions at real aspect ratios
+  const localAspect = localScreen ? localScreen.width / localScreen.height : 16 / 9;
+  const remoteAspect = remoteScreen ? remoteScreen.width / remoteScreen.height : 16 / 9;
+  const LOCAL_MAX = 128;
+  const REMOTE_MAX = 100;
+  const lw = localAspect >= 1 ? LOCAL_MAX : Math.round(LOCAL_MAX * localAspect);
+  const lh = localAspect >= 1 ? Math.round(LOCAL_MAX / localAspect) : LOCAL_MAX;
+  const rw = remoteAspect >= 1 ? REMOTE_MAX : Math.round(REMOTE_MAX * remoteAspect);
+  const rh = remoteAspect >= 1 ? Math.round(REMOTE_MAX / remoteAspect) : REMOTE_MAX;
+
+  // Local monitor is centered
+  const lx = (CANVAS_W - lw) / 2;
+  const ly = (CANVAS_H - lh) / 2;
+
+  // Remote monitor target position based on current edge
+  const targetForEdge = (e: Edge) => {
+    const gap = 12;
+    switch (e) {
+      case 'left':   return { x: lx - rw - gap,                            y: ly + (lh - rh) / 2 };
+      case 'right':  return { x: lx + lw + gap,                            y: ly + (lh - rh) / 2 };
+      case 'top':    return { x: lx + (lw - rw) / 2,                       y: ly - rh - gap };
+      case 'bottom': return { x: lx + (lw - rw) / 2,                       y: ly + lh + gap };
+    }
+  };
+  const snapped = targetForEdge(edge);
+
+  // Figure out closest edge based on where the remote tile was dropped
+  const handleDragEnd = (_e: unknown, info: { offset: { x: number; y: number }; point: { x: number; y: number } }) => {
+    if (!canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    // Remote tile center in canvas coordinates
+    const cx = info.point.x - rect.left;
+    const cy = info.point.y - rect.top;
+    const localCx = lx + lw / 2;
+    const localCy = ly + lh / 2;
+    const dx = cx - localCx;
+    const dy = cy - localCy;
+    // Pick the axis with the largest absolute displacement
+    let next: Edge;
+    if (Math.abs(dx) > Math.abs(dy)) next = dx > 0 ? 'right' : 'left';
+    else                              next = dy > 0 ? 'bottom' : 'top';
+    onEdge(next);
+  };
+
   return (
-    <div className="flex flex-col items-center gap-1.5">
+    <div
+      ref={canvasRef}
+      className="relative rounded-xl mx-auto select-none overflow-hidden"
+      style={{
+        width: CANVAS_W,
+        height: CANVAS_H,
+        background: 'var(--bg-subtle)',
+        border: '1px dashed var(--border-subtle)',
+      }}
+    >
+      {/* Drop-zone hints: subtle edge strips that highlight while dragging near */}
+      <div className="absolute inset-0 pointer-events-none">
+        {(['left', 'right', 'top', 'bottom'] as Edge[]).map((e) => {
+          const isActive = edge === e;
+          const common = {
+            position: 'absolute' as const,
+            background: isActive ? 'rgba(99,102,241,0.10)' : 'transparent',
+          };
+          if (e === 'left')   return <div key={e} style={{ ...common, left: 0, top: 0, bottom: 0, width: 40 }} />;
+          if (e === 'right')  return <div key={e} style={{ ...common, right: 0, top: 0, bottom: 0, width: 40 }} />;
+          if (e === 'top')    return <div key={e} style={{ ...common, left: 0, right: 0, top: 0, height: 40 }} />;
+          return                    <div key={e} style={{ ...common, left: 0, right: 0, bottom: 0, height: 40 }} />;
+        })}
+      </div>
+
+      {/* Local monitor — fixed center, labeled */}
       <div
-        className="rounded flex items-center justify-center"
+        className="absolute rounded-md flex items-center justify-center"
         style={{
-          width: w,
-          height: h,
-          background: `linear-gradient(135deg, ${color}22, ${color}14)`,
-          border: `1.5px solid ${color}50`,
-          boxShadow: `0 2px 10px ${color}20`,
+          left: lx,
+          top: ly,
+          width: lw,
+          height: lh,
+          background: 'linear-gradient(135deg, rgba(99,102,241,0.22), rgba(99,102,241,0.10))',
+          border: '1.5px solid rgba(99,102,241,0.55)',
+          boxShadow: '0 4px 18px rgba(99,102,241,0.22)',
         }}
       >
-        <span className="text-[10px] font-bold" style={{ color: `${color}bb` }}>
-          {label.split(' ')[0]}
-        </span>
+        <div className="text-center px-1">
+          <p className="text-[10px] font-bold truncate" style={{ color: 'var(--accent-primary)' }}>
+            {localName.split(' ')[0]}
+          </p>
+          {localScreen && (
+            <p className="text-[8px] font-mono mt-0.5" style={{ color: 'var(--text-faint)' }}>
+              {Math.round(localScreen.width)}×{Math.round(localScreen.height)}
+            </p>
+          )}
+        </div>
       </div>
-      {/* Stand */}
-      <div className="flex flex-col items-center gap-0" style={{ opacity: 0.5 }}>
-        <div style={{ width: 12, height: 4, background: color + '40', borderRadius: 2 }} />
-        <div style={{ width: 24, height: 2, background: color + '30', borderRadius: 1 }} />
-      </div>
+
+      {/* Remote monitor — draggable */}
+      {remoteName && (
+        <motion.div
+          key={`${edge}-${remoteName}`}
+          className="absolute rounded-md flex items-center justify-center cursor-grab active:cursor-grabbing"
+          drag
+          dragMomentum={false}
+          dragElastic={0}
+          dragConstraints={canvasRef}
+          onDragEnd={handleDragEnd}
+          initial={{ left: snapped.x, top: snapped.y }}
+          animate={{ left: snapped.x, top: snapped.y }}
+          transition={{ type: 'spring', stiffness: 320, damping: 28 }}
+          whileDrag={{ scale: 1.05, boxShadow: '0 10px 28px rgba(249,115,22,0.35)' }}
+          style={{
+            width: rw,
+            height: rh,
+            background: 'linear-gradient(135deg, rgba(249,115,22,0.22), rgba(249,115,22,0.10))',
+            border: '1.5px solid rgba(249,115,22,0.55)',
+            boxShadow: '0 3px 14px rgba(249,115,22,0.22)',
+            touchAction: 'none',
+          }}
+        >
+          <div className="text-center px-1 pointer-events-none">
+            <p className="text-[10px] font-bold truncate" style={{ color: '#f97316' }}>
+              {remoteName.split(' ')[0]}
+            </p>
+            {remoteScreen && (
+              <p className="text-[8px] font-mono mt-0.5" style={{ color: 'var(--text-faint)' }}>
+                {Math.round(remoteScreen.width)}×{Math.round(remoteScreen.height)}
+              </p>
+            )}
+          </div>
+          {/* Drag handle hint */}
+          <div
+            className="absolute top-1 right-1 flex flex-col gap-[1.5px] opacity-40 pointer-events-none"
+            style={{ color: '#f97316' }}
+          >
+            <div className="flex gap-[1.5px]"><span className="w-[2px] h-[2px] rounded-full bg-current"/><span className="w-[2px] h-[2px] rounded-full bg-current"/></div>
+            <div className="flex gap-[1.5px]"><span className="w-[2px] h-[2px] rounded-full bg-current"/><span className="w-[2px] h-[2px] rounded-full bg-current"/></div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Empty state when no peer */}
+      {!remoteName && (
+        <div className="absolute inset-0 flex items-end justify-center pb-3 pointer-events-none">
+          <p className="text-[10px]" style={{ color: 'var(--text-faint)' }}>
+            Connect to a device to arrange screens
+          </p>
+        </div>
+      )}
     </div>
   );
 };
 
 /* ── Directional arrow connector ── */
-const EdgeArrow = ({
-  edge,
-  active,
-  peerName,
-  onSet,
-}: {
-  edge: Edge;
-  active: boolean;
-  peerName?: string;
-  onSet: (e: Edge) => void;
-}) => {
-  const isVertical = edge === 'top' || edge === 'bottom';
-
-  const arrowPath = {
-    right: 'M5 12h14M13 6l6 6-6 6',
-    left: 'M19 12H5M11 6L5 12l6 6',
-    top: 'M12 19V5M6 11l6-6 6 6',
-    bottom: 'M12 5v14M6 13l6 6 6-6',
-  }[edge];
-
-  return (
-    <button
-      onClick={() => onSet(edge)}
-      className="relative flex flex-col items-center gap-1 group transition-all"
-      title={`Switch on ${edge} edge`}
-    >
-      <div
-        className="rounded-xl flex items-center justify-center transition-all"
-        style={{
-          width: isVertical ? 56 : 36,
-          height: isVertical ? 32 : 52,
-          background: active ? 'rgba(99,102,241,0.22)' : 'var(--bg-subtle)',
-          border: `1.5px solid ${active ? 'rgba(99,102,241,0.55)' : 'var(--border-subtle)'}`,
-          boxShadow: active ? '0 0 16px rgba(99,102,241,0.25)' : 'none',
-        }}
-      >
-        <svg
-          className="w-4 h-4 transition-colors"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke={active ? 'var(--accent-primary)' : 'var(--text-faint)'}
-          strokeWidth={2.5}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d={arrowPath} />
-        </svg>
-      </div>
-
-      {/* Peer label below active arrow */}
-      <AnimatePresence>
-        {active && peerName && (
-          <motion.p
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.8 }}
-            className="text-[9px] font-bold truncate max-w-[70px] text-center"
-            style={{ color: 'var(--accent-primary)' }}
-          >
-            {peerName.split(' ')[0]}
-          </motion.p>
-        )}
-      </AnimatePresence>
-    </button>
-  );
-};
 
 export const Layout = () => {
   const { peers, status, settings, setSettings } = useStore();
@@ -166,80 +238,34 @@ export const Layout = () => {
         {/* ── LEFT COLUMN — Spatial monitor view + Take Control ── */}
         <div className="flex flex-col gap-4">
           <Card
-            title="Screen Edge"
+            title="Screen Arrangement"
             icon={
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 5a1 1 0 011-1h4a1 1 0 010 2H5a1 1 0 01-1-1zm0 8a1 1 0 011-1h4a1 1 0 010 2H5a1 1 0 01-1-1zm6-8a1 1 0 011-1h8a1 1 0 010 2h-8a1 1 0 01-1-1zm0 8a1 1 0 011-1h8a1 1 0 010 2h-8a1 1 0 01-1-1z" />
               </svg>
             }
           >
-            <p className="text-[12px] mb-5 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              Which edge of <em>your screen</em> should switch control to the other computer?
+            <p className="text-[12px] mb-3 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              Drag <em>{connectedPeer?.name ?? 'the other computer'}</em> next to your screen.
+              The edge where you drop it is where your cursor will switch.
             </p>
 
-            {/* Visual monitor layout */}
-            <div className="flex flex-col items-center gap-2 select-none">
-              {/* Top edge button */}
-              <EdgeArrow edge="top" active={edge === 'top'} peerName={connectedPeer?.name} onSet={setEdge} />
-
-              {/* Middle row: left · monitors · right */}
-              <div className="flex items-center gap-3">
-                <EdgeArrow edge="left" active={edge === 'left'} peerName={connectedPeer?.name} onSet={setEdge} />
-
-                {/* Monitor pair */}
-                <div className="flex items-end gap-3 px-2 py-2">
-                  {(edge === 'left' || edge === 'top' || edge === 'bottom') && (
-                    <motion.div
-                      key={`peer-left-${edge}`}
-                      initial={{ opacity: 0, scale: 0.85 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className="opacity-60"
-                    >
-                      <MonitorShape
-                        label={connectedPeer?.name ?? 'Other'}
-                        color="#f97316"
-                        size="sm"
-                      />
-                    </motion.div>
-                  )}
-
-                  {/* This machine — always center */}
-                  <MonitorShape
-                    label={status?.device_name ?? 'You'}
-                    color="#6366f1"
-                    size="lg"
-                  />
-
-                  {(edge === 'right' || edge === 'top' || edge === 'bottom') && (
-                    <motion.div
-                      key={`peer-right-${edge}`}
-                      initial={{ opacity: 0, scale: 0.85 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className="opacity-60"
-                    >
-                      <MonitorShape
-                        label={connectedPeer?.name ?? 'Other'}
-                        color="#f97316"
-                        size="sm"
-                      />
-                    </motion.div>
-                  )}
-                </div>
-
-                <EdgeArrow edge="right" active={edge === 'right'} peerName={connectedPeer?.name} onSet={setEdge} />
-              </div>
-
-              {/* Bottom edge button */}
-              <EdgeArrow edge="bottom" active={edge === 'bottom'} peerName={connectedPeer?.name} onSet={setEdge} />
-            </div>
+            <ArrangementCanvas
+              localName={status?.device_name ?? 'You'}
+              localScreen={status?.local_screen}
+              remoteName={connectedPeer?.name}
+              remoteScreen={status?.remote_screen ?? undefined}
+              edge={edge}
+              onEdge={setEdge}
+            />
 
             {/* Current selection label */}
-            <p className="text-center text-xs mt-4" style={{ color: 'var(--text-muted)' }}>
-              Push cursor to{' '}
+            <p className="text-center text-xs mt-3" style={{ color: 'var(--text-muted)' }}>
+              Cursor switches on the{' '}
               <span style={{ color: 'var(--accent-primary)', fontWeight: 600 }}>
-                {edge} edge
+                {edge}
               </span>{' '}
-              to switch
+              edge
             </p>
           </Card>
 

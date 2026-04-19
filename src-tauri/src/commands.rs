@@ -30,12 +30,23 @@ pub async fn get_devices(state: State<'_, Arc<AppState>>) -> Result<Vec<PeerInfo
 
 #[tauri::command]
 pub async fn get_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    // Local screen dimensions — combined virtual bounds of all attached monitors.
+    let monitors = state.monitors.read().clone();
+    let (min_x, min_y, max_x, max_y) = crate::screen::layout::virtual_bounds(&monitors);
+    let local_w = (max_x - min_x).max(1.0);
+    let local_h = (max_y - min_y).max(1.0);
+
+    // Remote screen dimensions (received from the peer via ScreenSize message)
+    let remote = *state.remote_screen.lock();
+
     Ok(serde_json::json!({
         "device_id": state.device_id,
         "device_name": state.device_name,
         "connected_peer": *state.connected_peer.lock(),
         "relaying": state.is_relaying(),
         "is_controlled": state.is_controlled(),
+        "local_screen": { "width": local_w, "height": local_h },
+        "remote_screen": remote.map(|(w, h)| serde_json::json!({ "width": w, "height": h })),
     }))
 }
 

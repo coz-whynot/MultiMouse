@@ -8,12 +8,19 @@ export interface PeerInfo {
   is_known: boolean;
 }
 
+export interface ScreenSize {
+  width: number;
+  height: number;
+}
+
 export interface AppStatus {
   device_id: string;
   device_name: string;
   connected_peer: string | null;
   relaying: boolean;
   is_controlled: boolean;
+  local_screen?: ScreenSize;
+  remote_screen?: ScreenSize | null;
 }
 
 export interface Settings {
