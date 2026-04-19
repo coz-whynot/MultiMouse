@@ -27,3 +27,22 @@ src-tauri/target/
 *.njsproj
 *.sln
 *.sw?
+
+# Build artifacts / installers (ship via GitHub Releases, not git)
+*.dmg
+*.AppImage
+*.msi
+*.exe
+!src-tauri/**/*.exe
+*.deb
+*.rpm
+
+# Tauri signing key (never commit)
+*.key
+tauri-signing-*.key
+
+# Environment files
+.env
+.env.local
+.env.*.local
+

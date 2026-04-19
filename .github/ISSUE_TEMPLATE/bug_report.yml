@@ -1,0 +1,70 @@
+name: Bug report
+description: Something in MultiMouse isn't working the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill in the fields below so we can reproduce it quickly.
+
+  - type: input
+    id: version
+    attributes:
+      label: MultiMouse version
+      description: Shown in Settings.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host-os
+    attributes:
+      label: Host OS (the machine running MultiMouse)
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows 10
+        - Windows 11
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: peer-os
+    attributes:
+      label: Peer OS (if bug involves pairing)
+      placeholder: "e.g. Windows 11 peer paired with macOS host"
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch MultiMouse on both machines
+        2. Pair with PIN
+        3. Move cursor to right edge
+        4. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: |
+        Launch from a terminal (`./MultiMouse` on macOS/Linux, `multimouse.exe` from PowerShell on Windows) to capture stderr. Paste any relevant output here.
+      render: shell
