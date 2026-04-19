@@ -59,26 +59,45 @@ fn try_toggle_gaming_mode(event: &Event, state: &AppState, app: &AppHandle) -> b
 }
 
 pub fn start(app: AppHandle, state: Arc<AppState>) {
-    let state_grab = state.clone();
-    let app_grab = app.clone();
-
-    std::thread::spawn(move || {
-        let result = rdev::grab(move |event: Event| -> Option<Event> {
-            handle_grab(event, &state_grab, &app_grab)
-        });
-
-        if let Err(e) = result {
-            tracing::warn!("rdev::grab unavailable ({:?}), using listen fallback", e);
-            let platform = if cfg!(target_os = "macos") { "macos" }
-                           else if cfg!(target_os = "windows") { "windows" }
-                           else { "linux" };
-            let _ = app.emit("accessibility-needed", serde_json::json!({ "platform": platform }));
-            let app_listen = app.clone();
-            let _ = rdev::listen(move |event: Event| {
-                handle_listen(&event, &state, &app_listen);
+    // On macOS and Windows we use rdev::grab (CGEventTap / low-level hook)
+    // so we can consume events — required to avoid "cursor moves on both
+    // machines simultaneously" when relaying. On Linux, this fork's grab
+    // isn't exposed (no `unstable_grab` feature in fufesou/rdev), so we
+    // fall back to listen-only which observes events without consuming.
+    // Linux KVM-behaviour will be less tight than mac/win until we wire a
+    // native X11/Wayland grab path.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let state_grab = state.clone();
+        let app_grab = app.clone();
+        std::thread::spawn(move || {
+            let result = rdev::grab(move |event: Event| -> Option<Event> {
+                handle_grab(event, &state_grab, &app_grab)
             });
-        }
-    });
+            if let Err(e) = result {
+                tracing::warn!("rdev::grab unavailable ({:?}), using listen fallback", e);
+                let platform = if cfg!(target_os = "macos") { "macos" }
+                               else if cfg!(target_os = "windows") { "windows" }
+                               else { "linux" };
+                let _ = app.emit("accessibility-needed", serde_json::json!({ "platform": platform }));
+                let app_listen = app.clone();
+                let _ = rdev::listen(move |event: Event| {
+                    handle_listen(&event, &state, &app_listen);
+                });
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let state_listen = state.clone();
+        let app_listen = app.clone();
+        std::thread::spawn(move || {
+            let _ = rdev::listen(move |event: Event| {
+                handle_listen(&event, &state_listen, &app_listen);
+            });
+        });
+    }
 }
 
 fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event> {
