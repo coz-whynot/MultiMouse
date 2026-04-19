@@ -13,9 +13,11 @@
     "windows": [
       {
         "title": "MultiMouse",
-        "width": 420,
-        "height": 680,
-        "resizable": false,
+        "width": 900,
+        "height": 720,
+        "minWidth": 480,
+        "minHeight": 600,
+        "resizable": true,
         "decorations": false,
         "transparent": true,
         "visible": false,

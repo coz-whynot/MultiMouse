@@ -43,3 +43,8 @@ sha1 = "0.10"
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = "0.2"
+objc2-app-kit = { version = "0.2", features = ["NSWorkspace", "NSRunningApplication"] }

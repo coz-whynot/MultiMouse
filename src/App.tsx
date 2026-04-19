@@ -248,6 +248,10 @@ export default function App() {
     >
       <TitleBar />
 
+      {/* Content column — stays at a readable width even when the window is wide,
+          so cards don't stretch edge-to-edge and feel cramped. */}
+      <div className="flex flex-col flex-1 overflow-hidden mx-auto w-full max-w-[520px] px-1">
+
       {/* Reconnect banner */}
       <AnimatePresence>
         {reconnectState && (
@@ -485,6 +489,8 @@ export default function App() {
       </div>
 
       <BottomNav current={currentPage as any} onChange={setPage as any} connectedPeer={connectedPeer} />
+
+      </div> {/* end centered content column */}
 
       {/* Pairing modal */}
       <AnimatePresence>

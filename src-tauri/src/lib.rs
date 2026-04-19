@@ -73,7 +73,11 @@ pub fn run() {
                 .menu(&menu)
                 .tooltip("MultiMouse")
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => toggle_window(app),
+                    // "Show" always unconditionally brings the window forward —
+                    // toggling caused double-click flakiness on macOS because
+                    // is_visible() can lag behind actual window state for
+                    // accessory-policy apps.
+                    "show" => show_window(app),
                     "release" => emergency_release(app),
                     "disconnect" => emergency_disconnect(app),
                     "quit" => {
@@ -89,7 +93,9 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        toggle_window(tray.app_handle());
+                        // Left-click tray = always show (don't toggle). Users close
+                        // via the window's close button; tray click is always reveal.
+                        show_window(tray.app_handle());
                     }
                 })
                 .build(app)?;
@@ -228,14 +234,20 @@ fn shutdown_services(app: &AppHandle) {
     }
 }
 
-fn toggle_window(app: &AppHandle) {
+
+/// Unconditionally show + focus the main window. Handles the macOS accessory-policy
+/// quirk where a plain show() doesn't always bring the app to the foreground.
+fn show_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
-        if win.is_visible().unwrap_or(false) {
-            let _ = win.hide();
-        } else {
-            let _ = win.show();
-            let _ = win.set_focus();
+        #[cfg(target_os = "macos")]
+        {
+            // Briefly flip to Regular so the app becomes activatable, then show+focus.
+            // Keep it Regular while the window is visible so macOS treats clicks normally.
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
         }
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
     }
 }
 
