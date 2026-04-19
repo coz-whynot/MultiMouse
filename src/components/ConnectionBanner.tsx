@@ -112,26 +112,25 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
                 style={{ color: isLight ? 'rgba(30,27,75,0.55)' : 'rgba(255,255,255,0.4)' }}
               >
                 {relaying
-                  ? 'Mouse & keyboard forwarding'
+                  ? 'Forwarding input · Press ESC ESC to release'
                   : 'Push cursor to configured edge to take control'}
               </p>
             </div>
 
-            {/* Action buttons */}
+            {/* Action buttons — Release is ALWAYS enabled so the user can use the
+                tray menu / keyboard hotkey even when the cursor is unreachable */}
             <div className="flex gap-1.5 flex-shrink-0">
-              {relaying && (
-                <button
-                  onClick={handleRelease}
-                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-all"
-                  style={{
-                    background: 'rgba(255,255,255,0.07)',
-                    color: 'rgba(255,255,255,0.65)',
-                    border: '1px solid rgba(255,255,255,0.1)',
-                  }}
-                >
-                  Release
-                </button>
-              )}
+              <button
+                onClick={handleRelease}
+                className="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-all"
+                style={{
+                  background: relaying ? 'rgba(99,102,241,0.18)' : 'rgba(255,255,255,0.07)',
+                  color: relaying ? '#c7d2fe' : 'rgba(255,255,255,0.65)',
+                  border: `1px solid ${relaying ? 'rgba(99,102,241,0.32)' : 'rgba(255,255,255,0.1)'}`,
+                }}
+              >
+                Release
+              </button>
               <button
                 onClick={handleDisconnect}
                 className="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-all"

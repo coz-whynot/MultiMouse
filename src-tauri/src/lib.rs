@@ -61,9 +61,11 @@ pub fn run() {
             }
 
             let show = MenuItemBuilder::with_id("show", "Show MultiMouse").build(app)?;
+            let release = MenuItemBuilder::with_id("release", "Release Control (⎋)").build(app)?;
+            let disconnect = MenuItemBuilder::with_id("disconnect", "Disconnect").build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-            let menu = Menu::with_items(app, &[&show, &sep, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &release, &disconnect, &sep, &quit])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -71,6 +73,8 @@ pub fn run() {
                 .tooltip("MultiMouse")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => toggle_window(app),
+                    "release" => emergency_release(app),
+                    "disconnect" => emergency_disconnect(app),
                     "quit" => {
                         shutdown_services(app);
                         std::process::exit(0);
@@ -193,5 +197,42 @@ fn toggle_window(app: &AppHandle) {
             let _ = win.show();
             let _ = win.set_focus();
         }
+    }
+}
+
+/// Tray-menu "Release Control" — stops input forwarding and returns cursor to
+/// this machine. Works even when the mouse is stuck relaying to the remote.
+fn emergency_release(app: &AppHandle) {
+    use tauri::Emitter;
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        state.set_relaying(false);
+        *state.relay_entry.lock() = None;
+        state.send_net(network::protocol::NetCommand::FocusReleased);
+        // Warp local cursor to center so user can find it
+        let monitors = state.monitors.read().clone();
+        let (min_x, min_y, max_x, max_y) = screen::layout::virtual_bounds(&monitors);
+        let cx = ((min_x + max_x) / 2.0) as i32;
+        let cy = ((min_y + max_y) / 2.0) as i32;
+        input::inject::warp_abs(cx, cy);
+        let _ = app.emit("focus-released", ());
+        tracing::info!("Emergency release from tray");
+    }
+}
+
+/// Tray-menu "Disconnect" — fully drops the session.
+fn emergency_disconnect(app: &AppHandle) {
+    use tauri::Emitter;
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        state.mark_intentional_disconnect();
+        state.set_relaying(false);
+        *state.relay_entry.lock() = None;
+        state.send_net(network::protocol::NetCommand::Disconnect);
+        *state.connected_peer.lock() = None;
+        *state.net_tx.lock() = None;
+        let monitors = state.monitors.read().clone();
+        let (min_x, min_y, max_x, max_y) = screen::layout::virtual_bounds(&monitors);
+        input::inject::warp_abs(((min_x + max_x) / 2.0) as i32, ((min_y + max_y) / 2.0) as i32);
+        let _ = app.emit("disconnected", ());
+        tracing::info!("Emergency disconnect from tray");
     }
 }

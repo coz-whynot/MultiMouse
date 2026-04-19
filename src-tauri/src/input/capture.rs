@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter};
 use crate::state::AppState;
 use crate::network::protocol::{InputEvent, NetCommand};
 use crate::screen::layout;
+use crate::input::inject;
 
 const DOUBLE_CTRL_MS: u128 = 400;
 /// Throttle mouse-move to ~120 Hz max (8 ms between sends)
@@ -55,6 +56,31 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
 
 fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event> {
     if state.is_relaying() {
+        // Emergency escape hatch: double-Escape (within 600ms) always breaks out,
+        // regardless of the configured hotkey. Users can always recover this way.
+        if let EventType::KeyPress(rdev::Key::Escape) = &event.event_type {
+            thread_local! {
+                static LAST_ESC: Cell<Option<Instant>> = Cell::new(None);
+            }
+            let now = Instant::now();
+            let double = LAST_ESC.with(|t| {
+                let d = t.get().map(|p| now.duration_since(p).as_millis() < 600).unwrap_or(false);
+                t.set(Some(now));
+                d
+            });
+            if double {
+                state.set_relaying(false);
+                *state.relay_entry.lock() = None;
+                state.send_net(NetCommand::FocusReleased);
+                let monitors = state.monitors.read().clone();
+                let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
+                inject::warp_abs(((min_x + max_x) / 2.0) as i32, ((min_y + max_y) / 2.0) as i32);
+                sync_clipboard_async(state);
+                let _ = app.emit("focus-released", ());
+                tracing::info!("Relay released via emergency double-Esc");
+                return None;
+            }
+        }
         if let EventType::KeyPress(key) = &event.event_type {
             let hotkey = state.settings.read().hotkey_release.clone();
             if is_release_key(key, &hotkey) {
@@ -122,14 +148,25 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 if should_activate {
                     EDGE_FIRST_TOUCH.with(|t| t.set(None));
                     let (entry_x, entry_y) = compute_entry_point(x, y, &edge, &monitors, state);
-                    *state.relay_entry.lock() = Some((x, y, entry_x, entry_y));
+
+                    // Warp the local cursor off the edge to the screen center so the OS
+                    // stops clamping subsequent mouse motion (otherwise we'd only ever
+                    // see x=edge on the next event and the delta would be zero).
+                    let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
+                    let center_x = (min_x + max_x) / 2.0;
+                    let center_y = (min_y + max_y) / 2.0;
+                    inject::warp_abs(center_x as i32, center_y as i32);
+
+                    // Delta anchor is the CENTER (where cursor now lives after the warp),
+                    // not the edge. This keeps the delta math numerically sane.
+                    *state.relay_entry.lock() = Some((center_x, center_y, entry_x, entry_y));
                     state.set_relaying(true);
                     // Warp remote cursor to the entry point before activating control
                     state.send_net(NetCommand::Input(InputEvent::MouseMove { x: entry_x, y: entry_y }));
                     state.send_net(NetCommand::FocusAcquired);
                     sync_clipboard_async(state);
                     let _ = app.emit("focus-acquired", ());
-                    tracing::debug!("Relay ON — cursor at {} edge ({x:.0}, {y:.0}) → remote ({entry_x:.0}, {entry_y:.0})", edge);
+                    tracing::debug!("Relay ON — cursor at {} edge ({x:.0}, {y:.0}) → warped local to center ({center_x:.0}, {center_y:.0}), remote entry ({entry_x:.0}, {entry_y:.0})", edge);
                 }
             } else {
                 EDGE_FIRST_TOUCH.with(|t| t.set(None));
@@ -204,7 +241,11 @@ fn handle_listen(event: &Event, state: &AppState) {
                 if should_activate {
                     EDGE_FIRST_TOUCH.with(|t| t.set(None));
                     let (entry_x, entry_y) = compute_entry_point(x, y, &edge, &monitors, state);
-                    *state.relay_entry.lock() = Some((x, y, entry_x, entry_y));
+                    let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
+                    let center_x = (min_x + max_x) / 2.0;
+                    let center_y = (min_y + max_y) / 2.0;
+                    inject::warp_abs(center_x as i32, center_y as i32);
+                    *state.relay_entry.lock() = Some((center_x, center_y, entry_x, entry_y));
                     state.set_relaying(true);
                     state.send_net(NetCommand::Input(InputEvent::MouseMove { x: entry_x, y: entry_y }));
                     state.send_net(NetCommand::FocusAcquired);

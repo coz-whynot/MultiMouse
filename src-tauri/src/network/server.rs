@@ -7,7 +7,7 @@ use rand::Rng;
 
 use crate::state::{AppState, PeerStatus};
 use crate::network::protocol::{
-    InputEvent, Message, MULTIMOUSE_PORT,
+    Message, MULTIMOUSE_PORT,
     read_enc_message, send_enc_message,
 };
 use crate::crypto::encryption;
@@ -224,7 +224,9 @@ pub async fn handle_controller(
         ).await {
             Ok(Some(msg)) => match msg {
                 Message::Input(event) => {
-                    inject::process_event(scale_for_inject(event, &state));
+                    // Client already maps coordinates into this machine's screen space
+                    // via delta tracking on relay activation — no scaling needed here.
+                    inject::process_event(event);
                 }
                 Message::FocusAcquired => {
                     state.set_controlled(true);
@@ -297,22 +299,3 @@ async fn cleanup(app: &AppHandle, state: &AppState, peer_id: &str) {
     let _ = app.emit("disconnected", ());
 }
 
-/// Scale incoming mouse coordinates from the controller's screen space to
-/// our local screen space. No-op for non-mouse events or when the remote
-/// screen size is unknown.
-fn scale_for_inject(event: InputEvent, state: &AppState) -> InputEvent {
-    if let InputEvent::MouseMove { x, y } = event {
-        if let Some((rw, rh)) = *state.remote_screen.lock() {
-            if rw > 0.0 && rh > 0.0 {
-                let (lw, lh) = rdev::display_size()
-                    .map(|(w, h)| (w as f64, h as f64))
-                    .unwrap_or((1920.0, 1080.0));
-                return InputEvent::MouseMove {
-                    x: x * lw / rw,
-                    y: y * lh / rh,
-                };
-            }
-        }
-    }
-    event
-}

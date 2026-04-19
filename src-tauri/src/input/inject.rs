@@ -8,6 +8,7 @@ use crate::network::protocol::InputEvent;
 pub enum InjectCmd {
     Remote(InputEvent),
     MoveRel { dx: i32, dy: i32 },
+    MoveAbs { x: i32, y: i32 },
     Scroll { dx: i32, dy: i32 },
     Button { button: u8, pressed: bool },
     Text(String),
@@ -45,6 +46,15 @@ pub fn inject_move_rel(dx: i32, dy: i32) {
     }
 }
 
+/// Warp the LOCAL cursor to an absolute position. Used on relay activation to
+/// free the cursor from the screen edge so subsequent mouse motion generates
+/// real delta events rather than being clamped.
+pub fn warp_abs(x: i32, y: i32) {
+    if let Some(tx) = INJECT_TX.get() {
+        let _ = tx.send(InjectCmd::MoveAbs { x, y });
+    }
+}
+
 pub fn inject_scroll(dx: i32, dy: i32) {
     if let Some(tx) = INJECT_TX.get() {
         let _ = tx.send(InjectCmd::Scroll { dx, dy });
@@ -68,6 +78,9 @@ fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
         InjectCmd::Remote(event) => inject(enigo, event),
         InjectCmd::MoveRel { dx, dy } => {
             let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
+        }
+        InjectCmd::MoveAbs { x, y } => {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
         }
         InjectCmd::Scroll { dx, dy } => {
             if dy != 0 {

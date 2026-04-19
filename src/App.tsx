@@ -6,7 +6,7 @@ import { useStore } from './store/useStore';
 import { TitleBar } from './components/TitleBar';
 import { PinDisplay } from './components/PinModal';
 import { TransferPanel } from './components/TransferProgress';
-import { UpdateBanner } from './components/UpdateBanner';
+// UpdateBanner removed — update check now lives in Settings → About
 import { BottomNav } from './components/BottomNav';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { Home } from './pages/Home';
@@ -183,7 +183,6 @@ export default function App() {
       }}
     >
       <TitleBar />
-      <UpdateBanner />
 
       {/* Reconnect banner */}
       <AnimatePresence>
