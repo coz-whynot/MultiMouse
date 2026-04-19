@@ -259,7 +259,14 @@ impl AppState {
     /// input). Any reconnect attempts from the same peer_id will be rejected
     /// for the next 30s so the local user gets an un-locked mouse window.
     pub fn mark_peer_kicked(&self, peer_id: &str) {
-        let until = Instant::now() + std::time::Duration::from_secs(30);
+        // 5s was chosen after testing: long enough for the controller's client
+        // auto-reconnect backoff (first delay = 2s, then 5s) to not immediately
+        // win the race for the mouse, short enough that a legit "oops, I want
+        // to reconnect right away" retry works without the user feeling locked
+        // out. Previously this was 30s, which felt like a bug during normal
+        // flow (a spurious injected-Esc kick would block control for half a
+        // minute).
+        let until = Instant::now() + std::time::Duration::from_secs(5);
         self.peer_cooldowns.lock().insert(peer_id.to_string(), until);
     }
 

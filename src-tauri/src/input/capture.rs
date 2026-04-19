@@ -71,6 +71,17 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
         let state_grab = state.clone();
         let app_grab = app.clone();
         std::thread::spawn(move || {
+            // macOS only: the grab loop runs on this std::thread — NOT the
+            // process main thread. Inside rdev's convert() it builds the
+            // event's `unicode` field via TSMGetInputSourceProperty, which
+            // Apple asserts must be called from the main dispatch queue.
+            // The fufesou fork supports bouncing that call via the main
+            // queue *only* when `is_main_thread == false`; it defaults to
+            // true, so unless we flip it we get `_dispatch_assert_queue_fail`
+            // and a SIGTRAP on every keyboard event. This was the
+            // "disconnecting again and again" crash in v0.2.2–v0.2.6.
+            #[cfg(target_os = "macos")]
+            rdev::set_is_main_thread(false);
             let result = rdev::grab(move |event: Event| -> Option<Event> {
                 handle_grab(event, &state_grab, &app_grab)
             });
@@ -181,8 +192,17 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
         if state.is_controlled() {
             let is_user_input = match &event.event_type {
                 EventType::KeyPress(rdev::Key::Escape) => {
-                    tracing::info!("Receiver pressed Escape — signaling disconnect");
-                    true
+                    // Must also filter injected echoes: if the controller's
+                    // user pressed Esc to release on their end, that Esc is
+                    // forwarded to us and injected, and the grab sees it too.
+                    // Without this filter the receiver treats it as a local
+                    // "kick" and the session bounces into cooldown.
+                    if !inject::recently_injected(150) {
+                        tracing::info!("Receiver pressed Escape — signaling disconnect");
+                        true
+                    } else {
+                        false
+                    }
                 }
                 EventType::KeyPress(_) | EventType::ButtonPress(_) => {
                     // Distinguish native user input from our own echoed injection:
@@ -410,11 +430,29 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
             let remote = *state.remote_screen.lock();
 
             let (rx, ry) = if let Some((lx, ly, ex, ey)) = entry {
-                // Delta-based: track movement relative to where we entered relay mode
+                // Delta-based with cross-screen scaling: the raw cursor delta
+                // is in THIS machine's coord space. Scale it to the remote's
+                // coord space so "moving 50% across my screen" always moves
+                // "50% across the remote screen", regardless of resolution or
+                // DPI differences (Retina vs 1080p, 2K vs 4K, etc).
+                //
+                // Previously we applied dx/dy 1:1, which meant a 2560-wide
+                // Windows controlling a 1440-logical Mac could never reach the
+                // far edges and every click landed in the wrong spot because
+                // the on-screen cursor disagreed with where we told enigo to
+                // move. Fix #2, #4, #5 reported in v0.2.6 testing.
                 let dx = x - lx;
                 let dy = y - ly;
-                let nx = ex + dx;
-                let ny = ey + dy;
+                let (lw, lh) = rdev::display_size()
+                    .map(|(w, h)| (w as f64, h as f64))
+                    .unwrap_or((1920.0, 1080.0));
+                let (sx, sy) = if let Some((rw, rh)) = remote {
+                    (rw / lw.max(1.0), rh / lh.max(1.0))
+                } else {
+                    (1.0, 1.0)
+                };
+                let nx = ex + dx * sx;
+                let ny = ey + dy * sy;
                 if let Some((rw, rh)) = remote {
                     (nx.clamp(0.0, rw - 1.0), ny.clamp(0.0, rh - 1.0))
                 } else {
