@@ -39,6 +39,33 @@ pub fn recently_injected(window_ms: u64) -> bool {
     now.saturating_sub(last) <= window_ms
 }
 
+/// Primary display's scale factor, stored as f64 bits in a u64 atomic so the
+/// inject thread can read it without a mutex. Updated from
+/// `refresh_monitors` on the main thread.
+static PRIMARY_SCALE_BITS: AtomicU64 = AtomicU64::new(f64::to_bits(1.0));
+
+/// Called by the monitor refresh path whenever primary display changes, so
+/// the inject thread knows how to convert logical wire coords to the
+/// physical pixels SetCursorPos expects on Windows.
+pub fn set_primary_scale(sf: f64) {
+    PRIMARY_SCALE_BITS.store(sf.to_bits(), Ordering::Relaxed);
+}
+
+/// Convert logical wire coords to the coordinate unit `enigo.move_mouse` wants
+/// on this platform. macOS's CGWarp takes logical points as-is; Windows's
+/// SetCursorPos takes physical pixels so we scale up.
+#[inline]
+fn logical_to_inject_xy(x: f64, y: f64) -> (f64, f64) {
+    #[cfg(target_os = "windows")]
+    {
+        let sf = f64::from_bits(PRIMARY_SCALE_BITS.load(Ordering::Relaxed));
+        let sf = if sf.is_finite() && sf > 0.0 { sf } else { 1.0 };
+        (x * sf, y * sf)
+    }
+    #[cfg(not(target_os = "windows"))]
+    { (x, y) }
+}
+
 fn mark_injected() {
     LAST_INJECT_MS.store(start_ms(), Ordering::Relaxed);
 }
@@ -162,7 +189,8 @@ fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
             let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
         }
         InjectCmd::MoveAbs { x, y } => {
-            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+            let (fx, fy) = logical_to_inject_xy(x as f64, y as f64);
+            let _ = enigo.move_mouse(fx as i32, fy as i32, Coordinate::Abs);
         }
         InjectCmd::Scroll { dx, dy } => {
             if dy != 0 {
@@ -192,7 +220,13 @@ fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
 fn inject(enigo: &mut Enigo, event: InputEvent) {
     match event {
         InputEvent::MouseMove { x, y } => {
-            let _ = enigo.move_mouse(x as i32, y as i32, Coordinate::Abs);
+            // Wire coords are LOGICAL pixels. enigo on macOS uses
+            // CGWarpMouseCursorPosition which takes logical points directly,
+            // but enigo on Windows uses SetCursorPos which takes PHYSICAL
+            // pixels. Multiply by scale_factor on Windows so cursor covers
+            // the full desktop rather than only 1/sf of it.
+            let (fx, fy) = logical_to_inject_xy(x, y);
+            let _ = enigo.move_mouse(fx as i32, fy as i32, Coordinate::Abs);
         }
         InputEvent::MouseButton { button, pressed } => {
             let btn = match button {

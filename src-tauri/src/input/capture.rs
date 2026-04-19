@@ -15,6 +15,31 @@ const MOUSE_MOVE_INTERVAL_MS: u128 = 8;
 /// to pull away from the edge without immediately re-triggering relay.
 const RELEASE_DEBOUNCE_MS: u128 = 800;
 
+/// Primary monitor's scale factor. On Windows rdev reports mouse coordinates
+/// in PHYSICAL pixels while state.monitors stores LOGICAL dims (divided by
+/// scale_factor). Normalize rdev's input to logical here so delta-scaling
+/// math stays in one coordinate system. On macOS rdev already reports
+/// logical points, so this returns 1.0.
+#[inline]
+fn rdev_to_logical_factor(state: &AppState) -> f64 {
+    #[cfg(target_os = "windows")]
+    {
+        state
+            .monitors
+            .read()
+            .iter()
+            .find(|m| m.is_primary)
+            .map(|m| m.scale_factor)
+            .unwrap_or(1.0)
+            .max(1e-6)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = state;
+        1.0
+    }
+}
+
 // NOTE: edge-dwell + release-debounce timestamps are stored on AppState
 // (state.edge_first_touch, state.last_release) instead of thread_local!.
 // That way every disconnect path can reset them via state.reset_edge_state(),
@@ -243,6 +268,12 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
             // enter is_relaying=true, rdev::grab would start consuming events,
             // and the user's cursor would freeze with nothing being sent anywhere.
             let can_send = state.net_tx.lock().is_some();
+            // While we're the RECEIVER in a session, mouse moves we see here
+            // are the controller's injection echoed back by rdev's event tap.
+            // Don't arm edge-activation on those — it caused a feedback
+            // "rubber band" where injected moves at the edge would trigger
+            // our own relay-start and pull control back mid-move.
+            let is_echo = state.is_controlled() || inject::recently_injected(150);
             // Block re-activation for a short window after a release.
             let recently_released = state
                 .last_release
@@ -251,6 +282,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 .unwrap_or(false);
             let at_edge = can_send
                 && !recently_released
+                && !is_echo
                 && layout::is_at_edge(x, y, &edge, &monitors)
                 && state.connected_peer.lock().is_some();
 
@@ -430,19 +462,19 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
             let remote = *state.remote_screen.lock();
 
             let (rx, ry) = if let Some((lx, ly, ex, ey)) = entry {
-                // Delta-based with cross-screen scaling: the raw cursor delta
-                // is in THIS machine's coord space. Scale it to the remote's
-                // coord space so "moving 50% across my screen" always moves
-                // "50% across the remote screen", regardless of resolution or
-                // DPI differences (Retina vs 1080p, 2K vs 4K, etc).
-                //
-                // Previously we applied dx/dy 1:1, which meant a 2560-wide
-                // Windows controlling a 1440-logical Mac could never reach the
-                // far edges and every click landed in the wrong spot because
-                // the on-screen cursor disagreed with where we told enigo to
-                // move. Fix #2, #4, #5 reported in v0.2.6 testing.
-                let dx = x - lx;
-                let dy = y - ly;
+                // Wire positions are in LOGICAL pixels of the remote's
+                // coord space. Steps:
+                //   1. Normalize rdev's raw dx/dy to logical (Windows rdev
+                //      reports physical; Mac rdev already logical).
+                //   2. Scale logical dx by remote_width / local_width so
+                //      "50% across my screen" = "50% across theirs",
+                //      regardless of resolution or DPI.
+                //   3. Add to the remote's logical entry point.
+                // The receiver translates back to its own physical pixels
+                // inside `inject.rs` if needed (Windows only).
+                let coord_scale = rdev_to_logical_factor(state);
+                let dx = (x - lx) / coord_scale;
+                let dy = (y - ly) / coord_scale;
                 // Prefer the full virtual desktop bounds (all monitors) over
                 // rdev::display_size() which only reports the primary. On a
                 // multi-monitor setup this matches what compute_entry_point

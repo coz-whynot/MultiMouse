@@ -365,6 +365,9 @@ pub async fn get_monitors(
         })
         .collect();
 
+    if let Some(p) = monitors.iter().find(|m| m.is_primary).or_else(|| monitors.first()) {
+        crate::input::inject::set_primary_scale(p.scale_factor);
+    }
     *state.monitors.write() = monitors.clone();
     Ok(monitors)
 }

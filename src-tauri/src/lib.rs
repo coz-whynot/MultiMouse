@@ -61,6 +61,9 @@ pub fn run() {
                                 }
                             })
                             .collect();
+                        if let Some(p) = monitors.iter().find(|m| m.is_primary).or_else(|| monitors.first()) {
+                            crate::input::inject::set_primary_scale(p.scale_factor);
+                        }
                         *state.monitors.write() = monitors;
                     }
                 }
@@ -287,6 +290,12 @@ fn refresh_monitors(app: &AppHandle, state: &Arc<AppState>) {
             }
         })
         .collect();
+    // Tell the inject layer the current primary scale factor so it can
+    // convert logical wire coords to physical pixels for SetCursorPos on
+    // Windows. On macOS this is informational (enigo takes logical).
+    if let Some(primary) = monitors.iter().find(|m| m.is_primary).or_else(|| monitors.first()) {
+        crate::input::inject::set_primary_scale(primary.scale_factor);
+    }
     *state.monitors.write() = monitors;
 }
 
