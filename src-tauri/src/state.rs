@@ -39,6 +39,8 @@ pub struct Settings {
     pub onboarding_done: bool,
     #[serde(default = "default_auto_reconnect")]
     pub auto_reconnect: bool,
+    #[serde(default)]
+    pub idle_lock_minutes: u32,
 }
 
 fn default_edge_dwell_ms() -> u32 { 150 }
@@ -55,6 +57,7 @@ impl Default for Settings {
             edge_dwell_ms: 150,
             onboarding_done: false,
             auto_reconnect: true,
+            idle_lock_minutes: 0,
         }
     }
 }
@@ -117,6 +120,14 @@ pub struct AppState {
     pub intentional_disconnect: AtomicBool,
     /// Last peer we were connected to, used for auto-reconnect attempts
     pub last_peer_info: Mutex<Option<PeerInfo>>,
+    /// Total encrypted bytes sent on the session TCP stream
+    pub bytes_sent: std::sync::atomic::AtomicU64,
+    /// Total encrypted bytes received on the session TCP stream
+    pub bytes_received: std::sync::atomic::AtomicU64,
+    /// Start time of the current session, None when idle
+    pub session_start: Mutex<Option<std::time::Instant>>,
+    /// Last time we observed remote-input activity (used by idle auto-lock)
+    pub last_activity: Mutex<std::time::Instant>,
 }
 
 impl AppState {
@@ -151,7 +162,33 @@ impl AppState {
             trackpad_shutdown: Mutex::new(None),
             intentional_disconnect: AtomicBool::new(false),
             last_peer_info: Mutex::new(None),
+            bytes_sent: std::sync::atomic::AtomicU64::new(0),
+            bytes_received: std::sync::atomic::AtomicU64::new(0),
+            session_start: Mutex::new(None),
+            last_activity: Mutex::new(Instant::now()),
         }
+    }
+
+    pub fn add_bytes_sent(&self, n: u64) {
+        self.bytes_sent.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn add_bytes_received(&self, n: u64) {
+        self.bytes_received.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn reset_bandwidth(&self) {
+        self.bytes_sent.store(0, Ordering::Relaxed);
+        self.bytes_received.store(0, Ordering::Relaxed);
+        *self.session_start.lock() = None;
+    }
+
+    pub fn start_session(&self) {
+        *self.session_start.lock() = Some(Instant::now());
+    }
+
+    pub fn mark_activity(&self) {
+        *self.last_activity.lock() = Instant::now();
     }
 
     pub fn mark_intentional_disconnect(&self) {

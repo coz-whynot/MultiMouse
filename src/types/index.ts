@@ -25,6 +25,7 @@ export interface Settings {
   edge_dwell_ms: number;
   onboarding_done: boolean;
   auto_reconnect: boolean;
+  idle_lock_minutes: number;
 }
 
 export interface PairingRequest {
@@ -68,4 +69,23 @@ export interface MonitorInfo {
   height: number;
   scale_factor: number;
   is_primary: boolean;
+}
+
+export interface BandwidthStats {
+  bytes_sent: number;
+  bytes_received: number;
+  uptime_secs: number;
+}
+
+export interface AuditEntry {
+  timestamp: number; // unix seconds
+  action: 'connected' | 'disconnected' | 'pairing_rejected' | string;
+  peer_name: string;
+  peer_id?: string;
+  details?: string;
+}
+
+export interface IncomingDeepLink {
+  code: string;
+  host: string;
 }

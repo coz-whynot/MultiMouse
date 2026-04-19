@@ -25,7 +25,8 @@
     ],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": false
   },
   "bundle": {
     "active": true,
@@ -36,7 +37,10 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "entitlements": null
+    }
   },
   "plugins": {
     "updater": {
@@ -44,6 +48,11 @@
       "endpoints": [
         "https://github.com/coz-whynot/MultiMouse/releases/latest/download/latest.json"
       ]
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["multimouse"]
+      }
     }
   }
 }

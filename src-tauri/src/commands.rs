@@ -440,6 +440,38 @@ pub async fn stop_trackpad(
     Ok(())
 }
 
+// ── Bandwidth counters ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_bandwidth(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let sent = state.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+    let received = state.bytes_received.load(std::sync::atomic::Ordering::Relaxed);
+    let uptime_secs = state
+        .session_start
+        .lock()
+        .as_ref()
+        .map(|s| s.elapsed().as_secs())
+        .unwrap_or(0);
+    Ok(serde_json::json!({
+        "bytes_sent": sent,
+        "bytes_received": received,
+        "uptime_secs": uptime_secs,
+    }))
+}
+
+// ── Audit log ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_audit_log() -> Result<Vec<storage::AuditEntry>, String> {
+    Ok(storage::get_audit_log())
+}
+
+#[tauri::command]
+pub async fn clear_audit_log() -> Result<(), String> {
+    storage::clear_audit_log();
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_trackpad_status(
     state: State<'_, Arc<AppState>>,

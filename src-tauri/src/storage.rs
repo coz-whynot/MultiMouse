@@ -7,6 +7,8 @@ pub struct Config {
     pub known_devices: Vec<KnownDevice>,
     pub settings: Option<Settings>,
     pub device_id: Option<String>,
+    #[serde(default)]
+    pub audit_log: Vec<AuditEntry>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -16,6 +18,15 @@ pub struct KnownDevice {
     pub addr: String,
     pub port: u16,
     pub session_key: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AuditEntry {
+    pub timestamp_unix: i64, // seconds since epoch
+    pub device_id: String,
+    pub device_name: String,
+    pub peer_ip: String,
+    pub action: String, // "connected" | "disconnected" | "pairing_accepted" | "pairing_rejected"
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -101,4 +112,25 @@ pub fn get_known_device(device_id: &str) -> Option<KnownDevice> {
 
 pub fn get_all_known_devices() -> Vec<KnownDevice> {
     load().known_devices
+}
+
+pub fn append_audit(entry: AuditEntry) {
+    let mut config = load();
+    config.audit_log.push(entry);
+    // Keep only last 100 entries
+    let n = config.audit_log.len();
+    if n > 100 {
+        config.audit_log.drain(0..n - 100);
+    }
+    save(&config);
+}
+
+pub fn get_audit_log() -> Vec<AuditEntry> {
+    load().audit_log
+}
+
+pub fn clear_audit_log() {
+    let mut config = load();
+    config.audit_log.clear();
+    save(&config);
 }

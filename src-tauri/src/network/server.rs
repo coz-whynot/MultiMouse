@@ -201,7 +201,22 @@ pub async fn handle_controller(
         }
     }
     *state.connected_peer.lock() = Some(peer_id.clone());
+    state.reset_bandwidth();
+    state.start_session();
+    state.mark_activity();
     let _ = app.emit("connected", &peer_id);
+
+    // Audit log: connection event
+    storage::append_audit(storage::AuditEntry {
+        timestamp_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        device_id: peer_id.clone(),
+        device_name: peer_name.clone(),
+        peer_ip: peer_ip.clone(),
+        action: "connected".to_string(),
+    });
 
     let (w, h) = rdev::display_size().unwrap_or((1920, 1080));
     send_enc_message(
@@ -217,46 +232,78 @@ pub async fn handle_controller(
         *state.remote_screen.lock() = Some((width, height));
     }
 
+    let mut active_win_interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+    let mut last_app: Option<String> = None;
+
     loop {
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(15),
-            read_enc_message(&mut stream, &recv_enc),
-        ).await {
-            Ok(Some(msg)) => match msg {
-                Message::Input(event) => {
-                    // Client already maps coordinates into this machine's screen space
-                    // via delta tracking on relay activation — no scaling needed here.
-                    inject::process_event(event);
+        tokio::select! {
+            _ = active_win_interval.tick() => {
+                if let Some(app_name) = crate::input::active_window::current_app() {
+                    if Some(&app_name) != last_app.as_ref() {
+                        let msg = Message::ActiveWindow { app_name: app_name.clone() };
+                        // Approximate bytes on the wire: JSON length + 28 (tag+nonce) + 4 (length prefix)
+                        if let Ok(data) = serde_json::to_vec(&msg) {
+                            state.add_bytes_sent(data.len() as u64 + 32);
+                        }
+                        if !send_enc_message(&mut stream, &msg, &mut send_enc).await {
+                            break;
+                        }
+                        last_app = Some(app_name);
+                    }
                 }
-                Message::FocusAcquired => {
-                    state.set_controlled(true);
-                    let _ = app.emit("focus-acquired", ());
+            }
+            result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(15),
+                read_enc_message(&mut stream, &recv_enc),
+            ) => {
+                match result {
+                    Ok(Some(msg)) => {
+                        if let Ok(data) = serde_json::to_vec(&msg) {
+                            state.add_bytes_received(data.len() as u64 + 32);
+                        }
+                        match msg {
+                            Message::Input(event) => {
+                                // Client already maps coordinates into this machine's screen space
+                                // via delta tracking on relay activation — no scaling needed here.
+                                state.mark_activity();
+                                inject::process_event(event);
+                            }
+                            Message::FocusAcquired => {
+                                state.set_controlled(true);
+                                let _ = app.emit("focus-acquired", ());
+                            }
+                            Message::FocusReleased => {
+                                state.set_controlled(false);
+                                let _ = app.emit("focus-released", ());
+                            }
+                            Message::ClipboardText { text } => {
+                                set_clipboard(text);
+                            }
+                            Message::ClipboardImage { width, height, bytes } => {
+                                set_clipboard_image(width, height, bytes);
+                            }
+                            Message::Ping { ts } => {
+                                let pong = Message::Pong { ts };
+                                if let Ok(data) = serde_json::to_vec(&pong) {
+                                    state.add_bytes_sent(data.len() as u64 + 32);
+                                }
+                                send_enc_message(&mut stream, &pong, &mut send_enc).await;
+                            }
+                            Message::Bye => break,
+                            _ => {}
+                        }
+                    }
+                    Ok(None) => break, // parse error or connection closed
+                    Err(_) => {
+                        tracing::warn!("Connection timed out (no message in 15s) from {}", peer_addr);
+                        break;
+                    }
                 }
-                Message::FocusReleased => {
-                    state.set_controlled(false);
-                    let _ = app.emit("focus-released", ());
-                }
-                Message::ClipboardText { text } => {
-                    set_clipboard(text);
-                }
-                Message::ClipboardImage { width, height, bytes } => {
-                    set_clipboard_image(width, height, bytes);
-                }
-                Message::Ping { ts } => {
-                    send_enc_message(&mut stream, &Message::Pong { ts }, &mut send_enc).await;
-                }
-                Message::Bye => break,
-                _ => {}
-            },
-            Ok(None) => break, // parse error or connection closed
-            Err(_) => {
-                tracing::warn!("Connection timed out (no message in 15s) from {}", peer_addr);
-                break;
             }
         }
     }
 
-    cleanup(&app, &state, &peer_id).await;
+    cleanup(&app, &state, &peer_id, &peer_name, &peer_ip).await;
 }
 
 fn generate_session_key() -> String {
@@ -285,7 +332,13 @@ fn set_clipboard_image(width: u32, height: u32, bytes: Vec<u8>) {
     });
 }
 
-async fn cleanup(app: &AppHandle, state: &AppState, peer_id: &str) {
+async fn cleanup(
+    app: &AppHandle,
+    state: &AppState,
+    peer_id: &str,
+    peer_name: &str,
+    peer_ip: &str,
+) {
     {
         let mut peers = state.peers.lock();
         if let Some(p) = peers.iter_mut().find(|p| p.id == peer_id) {
@@ -296,6 +349,19 @@ async fn cleanup(app: &AppHandle, state: &AppState, peer_id: &str) {
     *state.remote_screen.lock() = None;
     state.set_relaying(false);
     state.set_controlled(false);
+    state.reset_bandwidth();
+
+    storage::append_audit(storage::AuditEntry {
+        timestamp_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        device_id: peer_id.to_string(),
+        device_name: peer_name.to_string(),
+        peer_ip: peer_ip.to_string(),
+        action: "disconnected".to_string(),
+    });
+
     let _ = app.emit("disconnected", ());
 }
 

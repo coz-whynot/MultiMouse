@@ -1,5 +1,13 @@
 import { create } from 'zustand';
-import { PeerInfo, AppStatus, Settings, PairingRequest, TransferInfo, FileOffer } from '../types';
+import {
+  PeerInfo,
+  AppStatus,
+  Settings,
+  PairingRequest,
+  TransferInfo,
+  FileOffer,
+  IncomingDeepLink,
+} from '../types';
 
 interface Store {
   peers: PeerInfo[];
@@ -11,6 +19,7 @@ interface Store {
   currentPage: 'home' | 'layout' | 'settings';
   transfers: TransferInfo[];
   fileOffer: FileOffer | null;
+  incomingDeepLink: IncomingDeepLink | null;
 
   setPeers: (peers: PeerInfo[]) => void;
   setStatus: (status: AppStatus) => void;
@@ -21,6 +30,7 @@ interface Store {
   setPage: (page: 'home' | 'layout' | 'settings') => void;
   setTransfers: (transfers: TransferInfo[]) => void;
   setFileOffer: (offer: FileOffer | null) => void;
+  setIncomingDeepLink: (link: IncomingDeepLink | null) => void;
 }
 
 export const useStore = create<Store>((set) => ({
@@ -33,6 +43,7 @@ export const useStore = create<Store>((set) => ({
   currentPage: 'home',
   transfers: [],
   fileOffer: null,
+  incomingDeepLink: null,
 
   setPeers: (peers) => set({ peers }),
   setStatus: (status) => set({ status }),
@@ -43,4 +54,5 @@ export const useStore = create<Store>((set) => ({
   setPage: (page) => set({ currentPage: page }),
   setTransfers: (transfers) => set({ transfers }),
   setFileOffer: (offer) => set({ fileOffer: offer }),
+  setIncomingDeepLink: (link) => set({ incomingDeepLink: link }),
 }));

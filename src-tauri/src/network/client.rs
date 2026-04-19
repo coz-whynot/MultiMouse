@@ -146,6 +146,9 @@ pub async fn connect_stream(
     *state.connected_peer.lock() = Some(peer.id.clone());
     state.reset_disconnect_flag();
     *state.last_peer_info.lock() = Some(peer.clone());
+    state.reset_bandwidth();
+    state.start_session();
+    state.mark_activity();
     let _ = app.emit("connected", &peer.id);
 
     let (net_tx, mut net_rx) = mpsc::channel::<NetCommand>(512);
@@ -154,10 +157,15 @@ pub async fn connect_stream(
     let (mut reader, mut writer) = stream.into_split();
 
     // Writer task: drains net_rx and sends encrypted messages to remote
+    let state_writer = state.clone();
     tokio::spawn(async move {
         while let Some(cmd) = net_rx.recv().await {
             if matches!(cmd, NetCommand::Disconnect) {
-                send_enc_message(&mut writer, &Message::Bye, &mut send_enc).await;
+                let bye = Message::Bye;
+                if let Ok(data) = serde_json::to_vec(&bye) {
+                    state_writer.add_bytes_sent(data.len() as u64 + 32);
+                }
+                send_enc_message(&mut writer, &bye, &mut send_enc).await;
                 break;
             }
             let msg = match cmd {
@@ -170,6 +178,9 @@ pub async fn connect_stream(
                 NetCommand::Ping(ts) => Message::Ping { ts },
                 NetCommand::Disconnect => unreachable!(),
             };
+            if let Ok(data) = serde_json::to_vec(&msg) {
+                state_writer.add_bytes_sent(data.len() as u64 + 32);
+            }
             if !send_enc_message(&mut writer, &msg, &mut send_enc).await {
                 break;
             }
@@ -193,20 +204,30 @@ pub async fn connect_stream(
             }
             result = read_enc_message(&mut reader, &recv_enc) => {
                 match result {
-                    Some(Message::Bye) => break,
-                    Some(Message::Pong { ts }) => {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-                        let rtt_ms = (now.saturating_sub(ts) / 2) as u32;
-                        let mut peers = state_ping.peers.lock();
-                        if let Some(p) = peers.iter_mut().find(|p| p.id == peer_id_ping) {
-                            p.ping_ms = Some(rtt_ms);
+                    Some(msg) => {
+                        if let Ok(data) = serde_json::to_vec(&msg) {
+                            state_ping.add_bytes_received(data.len() as u64 + 32);
+                        }
+                        match msg {
+                            Message::Bye => break,
+                            Message::Pong { ts } => {
+                                let now = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                let rtt_ms = (now.saturating_sub(ts) / 2) as u32;
+                                let mut peers = state_ping.peers.lock();
+                                if let Some(p) = peers.iter_mut().find(|p| p.id == peer_id_ping) {
+                                    p.ping_ms = Some(rtt_ms);
+                                }
+                            }
+                            Message::ActiveWindow { app_name } => {
+                                let _ = app.emit("remote-active-window", app_name);
+                            }
+                            _ => {}
                         }
                     }
                     None => break,
-                    _ => {}
                 }
             }
         }
@@ -223,6 +244,7 @@ pub async fn connect_stream(
     *state.remote_screen.lock() = None;
     *state.relay_entry.lock() = None;
     state.set_relaying(false);
+    state.reset_bandwidth();
     let _ = app.emit("disconnected", ());
 
     // Auto-reconnect if this was an unclean disconnect and we have a stored session key

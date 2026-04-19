@@ -47,6 +47,9 @@ pub enum Message {
     Pong {
         ts: u64,
     },
+    ActiveWindow {
+        app_name: String,
+    },
     Bye,
 }
 

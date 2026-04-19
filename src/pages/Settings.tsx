@@ -1,8 +1,69 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
 import { useStore } from '../store/useStore';
-import { Settings, KnownDevice } from '../types';
+import { Settings, KnownDevice, BandwidthStats, AuditEntry } from '../types';
+
+/* ── Byte / time formatters for Session Stats ── */
+const formatBytes = (n: number): string => {
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+};
+
+const formatUptime = (secs: number): string => {
+  if (!Number.isFinite(secs) || secs <= 0) return '0s';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = Math.floor(secs % 60);
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+};
+
+/* ── Relative time for audit log ── */
+const formatRelativeTime = (unixSecs: number): string => {
+  const now = Date.now() / 1000;
+  const delta = Math.max(0, now - unixSecs);
+  if (delta < 60) return 'just now';
+  if (delta < 3600) {
+    const m = Math.floor(delta / 60);
+    return `${m} min ago`;
+  }
+  if (delta < 86400) {
+    const h = Math.floor(delta / 3600);
+    return h === 1 ? '1 hour ago' : `${h} hours ago`;
+  }
+  if (delta < 172800) return 'yesterday';
+  if (delta < 86400 * 7) {
+    const d = Math.floor(delta / 86400);
+    return `${d} days ago`;
+  }
+  const dt = new Date(unixSecs * 1000);
+  return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+};
+
+/* ── Color dot per audit action ── */
+const auditDotColor = (action: string): string => {
+  if (action === 'connected') return '#34d399';
+  if (action === 'pairing_rejected') return '#f87171';
+  return 'rgba(255,255,255,0.35)';
+};
+
+const auditDotEmoji = (action: string): string => {
+  if (action === 'connected') return '🟢';
+  if (action === 'pairing_rejected') return '🔴';
+  return '⚫';
+};
+
+const auditLabel = (action: string): string => {
+  if (action === 'connected') return 'connected';
+  if (action === 'disconnected') return 'disconnected';
+  if (action === 'pairing_rejected') return 'pairing rejected';
+  return action.replace(/_/g, ' ');
+};
 
 /* ── Toggle switch ── */
 const Toggle = ({
@@ -181,10 +242,81 @@ export const SettingsPage = () => {
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
   const [updateOk, setUpdateOk] = useState(false);
 
+  const [bandwidth, setBandwidth] = useState<BandwidthStats | null>(null);
+  const [auditLog, setAuditLog] = useState<AuditEntry[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [confirmClearAudit, setConfirmClearAudit] = useState(false);
+
+  const connectedPeer = status?.connected_peer ?? null;
+
   useEffect(() => {
     if (settings) setRelayInput(settings.relay_url ?? '');
     invoke<KnownDevice[]>('get_known_devices').then(setKnownDevices).catch(() => {});
   }, [settings?.relay_url]);
+
+  // Poll bandwidth while a peer is connected.
+  useEffect(() => {
+    if (!connectedPeer) {
+      setBandwidth(null);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const b = await invoke<BandwidthStats>('get_bandwidth');
+        if (!cancelled) setBandwidth(b);
+      } catch {
+        // backend may not be ready yet — silently ignore
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [connectedPeer]);
+
+  // Load audit log on mount (and refresh occasionally on connect/disconnect).
+  const loadAuditLog = async () => {
+    setAuditLoading(true);
+    try {
+      const entries = await invoke<AuditEntry[]>('get_audit_log');
+      setAuditLog(Array.isArray(entries) ? entries : []);
+    } catch {
+      // backend may not be ready yet — leave list empty
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAuditLog();
+  }, []);
+
+  useEffect(() => {
+    loadAuditLog();
+  }, [connectedPeer]);
+
+  const sentShare = useMemo(() => {
+    if (!bandwidth) return 0.5;
+    const total = bandwidth.bytes_sent + bandwidth.bytes_received;
+    if (total <= 0) return 0.5;
+    return bandwidth.bytes_sent / total;
+  }, [bandwidth]);
+
+  const recentAudit = useMemo(() => auditLog.slice(0, 20), [auditLog]);
+
+  const handleClearAudit = async () => {
+    try {
+      await invoke('clear_audit_log');
+      setAuditLog([]);
+    } catch (e) {
+      console.error('clear_audit_log failed', e);
+    } finally {
+      setConfirmClearAudit(false);
+    }
+  };
 
   if (!settings) return null;
 
@@ -297,6 +429,74 @@ export const SettingsPage = () => {
                 );
               })}
             </div>
+          </div>
+        </Row>
+      </Section>
+
+      {/* ── Security ── */}
+      <Section
+        title="Security"
+        icon={
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round"
+              d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+        }
+      >
+        <Row noDivider>
+          <div className="flex items-start justify-between gap-4 mb-2">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium" style={{ color: 'rgba(255,255,255,0.78)' }}>
+                Idle auto-lock
+              </p>
+              <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'rgba(255,255,255,0.28)' }}>
+                Drop remote control after a period of inactivity
+              </p>
+            </div>
+            <span
+              className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg flex-shrink-0"
+              style={{
+                background: 'rgba(99,102,241,0.1)',
+                border: '1px solid rgba(99,102,241,0.22)',
+                color: '#a78bfa',
+              }}
+            >
+              {(settings.idle_lock_minutes ?? 0) === 0
+                ? 'Off'
+                : `${settings.idle_lock_minutes} min`}
+            </span>
+          </div>
+          <div
+            className="flex items-center rounded-xl p-0.5 flex-wrap gap-0.5"
+            style={{
+              background: 'rgba(255,255,255,0.05)',
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}
+          >
+            {[0, 5, 10, 15, 30, 60].map((mins) => {
+              const active = (settings.idle_lock_minutes ?? 0) === mins;
+              return (
+                <button
+                  key={mins}
+                  onClick={() => update({ idle_lock_minutes: mins })}
+                  className="relative flex-1 px-2 py-1 text-[11px] font-semibold transition-colors"
+                  style={{ color: active ? 'white' : 'rgba(255,255,255,0.42)', minWidth: 38 }}
+                >
+                  {active && (
+                    <motion.div
+                      layoutId="idlelock-pill"
+                      className="absolute inset-0 rounded-lg"
+                      style={{
+                        background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                        boxShadow: '0 2px 8px rgba(99,102,241,0.35)',
+                      }}
+                      transition={{ type: 'spring', stiffness: 500, damping: 34 }}
+                    />
+                  )}
+                  <span className="relative z-10">{mins === 0 ? 'Off' : `${mins}m`}</span>
+                </button>
+              );
+            })}
           </div>
         </Row>
       </Section>
@@ -452,6 +652,201 @@ export const SettingsPage = () => {
               <p className="text-[10px]" style={{ color: 'rgba(255,255,255,0.2)' }}>
                 Paired devices reconnect automatically without a PIN.
               </p>
+            </div>
+          </>
+        )}
+      </Section>
+
+      {/* ── Session Stats (only while connected) ── */}
+      {connectedPeer && (
+        <Section
+          title="Session Stats"
+          icon={
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+            </svg>
+          }
+        >
+          <Row>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { label: 'Sent', value: formatBytes(bandwidth?.bytes_sent ?? 0), color: '#a78bfa' },
+                { label: 'Received', value: formatBytes(bandwidth?.bytes_received ?? 0), color: '#34d399' },
+                {
+                  label: 'Total',
+                  value: formatBytes(
+                    (bandwidth?.bytes_sent ?? 0) + (bandwidth?.bytes_received ?? 0),
+                  ),
+                  color: '#fbbf24',
+                },
+                { label: 'Uptime', value: formatUptime(bandwidth?.uptime_secs ?? 0), color: '#60a5fa' },
+              ].map((tile) => (
+                <div
+                  key={tile.label}
+                  className="rounded-xl px-3 py-2.5"
+                  style={{
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.06)',
+                  }}
+                >
+                  <p
+                    className="text-[10px] font-bold uppercase tracking-widest mb-1"
+                    style={{ color: 'rgba(255,255,255,0.32)' }}
+                  >
+                    {tile.label}
+                  </p>
+                  <p
+                    className="text-sm font-mono font-bold"
+                    style={{ color: tile.color }}
+                  >
+                    {tile.value}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </Row>
+          <Row noDivider>
+            <p
+              className="text-[10px] font-bold uppercase tracking-widest mb-1.5"
+              style={{ color: 'rgba(255,255,255,0.32)' }}
+            >
+              Ratio
+            </p>
+            <div
+              className="w-full h-2 rounded-full overflow-hidden flex"
+              style={{ background: 'rgba(255,255,255,0.05)' }}
+            >
+              <div
+                className="h-full transition-all"
+                style={{
+                  width: `${Math.round(sentShare * 100)}%`,
+                  background: 'linear-gradient(90deg, #6366f1, #a855f7)',
+                }}
+              />
+              <div
+                className="h-full transition-all"
+                style={{
+                  width: `${Math.round((1 - sentShare) * 100)}%`,
+                  background: 'linear-gradient(90deg, #10b981, #34d399)',
+                }}
+              />
+            </div>
+            <div className="flex justify-between mt-1 text-[10px]" style={{ color: 'rgba(255,255,255,0.32)' }}>
+              <span>Sent</span>
+              <span>Received</span>
+            </div>
+          </Row>
+        </Section>
+      )}
+
+      {/* ── Activity Log ── */}
+      <Section
+        title="Activity Log"
+        icon={
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round"
+              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        }
+      >
+        {recentAudit.length === 0 ? (
+          <div className="px-4 py-5 flex flex-col items-center gap-1.5">
+            <svg className="w-7 h-7 mb-1" fill="none" viewBox="0 0 24 24" stroke="rgba(255,255,255,0.15)" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p className="text-xs" style={{ color: 'rgba(255,255,255,0.25)' }}>
+              {auditLoading ? 'Loading…' : 'No activity yet'}
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="max-h-56 overflow-y-auto">
+              {recentAudit.map((entry, idx) => (
+                <div
+                  key={`${entry.timestamp}-${idx}`}
+                  className="px-4 py-2.5 flex items-center gap-3"
+                  style={{
+                    borderBottom:
+                      idx === recentAudit.length - 1
+                        ? 'none'
+                        : '1px solid rgba(255,255,255,0.05)',
+                  }}
+                >
+                  <span
+                    className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ background: auditDotColor(entry.action) }}
+                    aria-label={auditDotEmoji(entry.action)}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium truncate" style={{ color: 'rgba(255,255,255,0.75)' }}>
+                      {entry.peer_name || 'Unknown device'}
+                      <span className="mx-1.5" style={{ color: 'rgba(255,255,255,0.28)' }}>·</span>
+                      <span style={{ color: 'rgba(255,255,255,0.5)' }}>{auditLabel(entry.action)}</span>
+                    </p>
+                    {entry.details && (
+                      <p className="text-[10px] mt-0.5 truncate" style={{ color: 'rgba(255,255,255,0.3)' }}>
+                        {entry.details}
+                      </p>
+                    )}
+                  </div>
+                  <span className="text-[10px] flex-shrink-0" style={{ color: 'rgba(255,255,255,0.32)' }}>
+                    {formatRelativeTime(entry.timestamp)}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="px-4 py-2.5 flex items-center justify-between gap-2" style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+              <p className="text-[10px]" style={{ color: 'rgba(255,255,255,0.25)' }}>
+                Most recent {recentAudit.length} {recentAudit.length === 1 ? 'event' : 'events'}
+              </p>
+              <AnimatePresence mode="wait">
+                {confirmClearAudit ? (
+                  <motion.div
+                    key="confirm-clear"
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.9 }}
+                    className="flex items-center gap-1.5"
+                  >
+                    <button
+                      onClick={() => setConfirmClearAudit(false)}
+                      className="text-xs px-2 py-1 rounded-lg transition-all"
+                      style={{ color: 'rgba(255,255,255,0.45)', background: 'rgba(255,255,255,0.06)' }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleClearAudit}
+                      className="text-xs px-2 py-1 rounded-lg font-semibold transition-all"
+                      style={{
+                        color: '#f87171',
+                        background: 'rgba(239,68,68,0.12)',
+                        border: '1px solid rgba(239,68,68,0.2)',
+                      }}
+                    >
+                      Confirm clear
+                    </button>
+                  </motion.div>
+                ) : (
+                  <motion.button
+                    key="clear"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    onClick={() => setConfirmClearAudit(true)}
+                    className="text-xs px-2 py-1 rounded-lg transition-all"
+                    style={{
+                      color: 'rgba(255,255,255,0.45)',
+                      background: 'rgba(255,255,255,0.04)',
+                      border: '1px solid rgba(255,255,255,0.08)',
+                    }}
+                  >
+                    Clear log
+                  </motion.button>
+                )}
+              </AnimatePresence>
             </div>
           </>
         )}

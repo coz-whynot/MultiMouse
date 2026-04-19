@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 use state::AppState;
 
@@ -24,6 +24,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -112,6 +113,41 @@ pub fn run() {
                 refresh_monitors(&app_mon, &state_mon);
             });
 
+            // Deep-link handler: emit incoming multimouse:// URLs to the frontend
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let app_handle_dl = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        tracing::info!("Deep link: {}", url);
+                        let _ = app_handle_dl.emit("deep-link", url.to_string());
+                    }
+                });
+            }
+
+            // Idle auto-lock checker: every 30s, if idle_lock_minutes > 0 and the
+            // session has been idle for longer than that, drop the connection.
+            let state_idle = state.clone();
+            let app_idle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                let minutes = state_idle.settings.read().idle_lock_minutes;
+                if minutes == 0 {
+                    continue;
+                }
+                let last = *state_idle.last_activity.lock();
+                if last.elapsed().as_secs() >= (minutes as u64) * 60
+                    && state_idle.connected_peer.lock().is_some()
+                {
+                    tracing::info!("Idle auto-lock triggered ({} min)", minutes);
+                    state_idle.send_net(crate::network::protocol::NetCommand::Disconnect);
+                    *state_idle.connected_peer.lock() = None;
+                    *state_idle.net_tx.lock() = None;
+                    let _ = app_idle.emit("idle-lock-triggered", ());
+                    let _ = app_idle.emit("disconnected", ());
+                }
+            });
+
             // Show window on first launch so the user sees something immediately.
             // They can close it to the tray after that.
             if let Some(win) = app.get_webview_window("main") {
@@ -145,6 +181,9 @@ pub fn run() {
             commands::start_trackpad,
             commands::stop_trackpad,
             commands::get_trackpad_status,
+            commands::get_bandwidth,
+            commands::get_audit_log,
+            commands::clear_audit_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MultiMouse");

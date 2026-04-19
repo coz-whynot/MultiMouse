@@ -1,7 +1,25 @@
+import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { PeerInfo } from '../types';
 import { useStore } from '../store/useStore';
+
+/* Rough emoji picker for an app-name heuristic. Extend as needed. */
+const appEmoji = (name: string): string => {
+  const n = name.toLowerCase();
+  if (/(chrome|safari|firefox|edge|browser|arc|opera|brave)/.test(n)) return '🌐';
+  if (/(code|vim|emacs|sublime|atom|intellij|pycharm|webstorm|xcode|android studio|editor)/.test(n)) return '📝';
+  if (/(terminal|iterm|console|powershell|cmd|bash|zsh|hyper|warp)/.test(n)) return '⌨️';
+  if (/(slack|discord|teams|zoom|messages|telegram|whatsapp|signal)/.test(n)) return '💬';
+  if (/(mail|outlook|gmail|thunderbird)/.test(n)) return '✉️';
+  if (/(music|spotify|itunes|apple music)/.test(n)) return '🎵';
+  if (/(photos|photoshop|preview|image|lightroom|figma|sketch)/.test(n)) return '🎨';
+  if (/(video|vlc|quicktime|netflix|youtube|obs|final cut|premiere)/.test(n)) return '🎬';
+  if (/(finder|explorer|files)/.test(n)) return '📁';
+  if (/(notes|obsidian|notion|word|pages|docs)/.test(n)) return '📄';
+  return '▢';
+};
 
 interface Props {
   connectedPeer?: PeerInfo;
@@ -62,6 +80,27 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
   const handleDisconnect = () => invoke('disconnect');
   const handleRelease = () => invoke('release_cursor');
 
+  const [activeWindow, setActiveWindow] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unlisten = listen<string>('remote-active-window', (e) => {
+      const name = typeof e.payload === 'string' ? e.payload.trim() : '';
+      setActiveWindow(name.length > 0 ? name : null);
+    });
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, []);
+
+  // Clear the cached active window the moment relay stops so we don't
+  // display stale app names when the user grabs control again later.
+  useEffect(() => {
+    if (!relaying) setActiveWindow(null);
+  }, [relaying]);
+
+  const peerName = connectedPeer?.name ?? '';
+  const showActive = relaying && !!activeWindow;
+
   return (
     <AnimatePresence>
       {connectedPeer && (
@@ -100,10 +139,39 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <p
-                  className="text-sm font-semibold leading-tight truncate"
+                  className="text-sm font-semibold leading-tight truncate flex items-center gap-1.5"
                   style={{ color: isLight ? '#1e1b4b' : '#ffffff' }}
                 >
-                  {relaying ? `Controlling ${connectedPeer.name}` : `Linked · ${connectedPeer.name}`}
+                  {relaying ? (
+                    <AnimatePresence mode="wait" initial={false}>
+                      {showActive ? (
+                        <motion.span
+                          key={`active-${activeWindow}`}
+                          initial={{ opacity: 0, y: 4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -4 }}
+                          transition={{ duration: 0.18 }}
+                          className="truncate"
+                        >
+                          <span className="mr-1">{appEmoji(activeWindow!)}</span>
+                          Controlling {activeWindow} on {peerName}
+                        </motion.span>
+                      ) : (
+                        <motion.span
+                          key="controlling-plain"
+                          initial={{ opacity: 0, y: 4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -4 }}
+                          transition={{ duration: 0.18 }}
+                          className="truncate"
+                        >
+                          Controlling {peerName}
+                        </motion.span>
+                      )}
+                    </AnimatePresence>
+                  ) : (
+                    <span className="truncate">Linked · {peerName}</span>
+                  )}
                 </p>
                 <LatencyPill ms={connectedPeer.ping_ms} />
               </div>
