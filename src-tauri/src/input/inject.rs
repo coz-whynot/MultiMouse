@@ -1,6 +1,8 @@
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use once_cell::sync::OnceCell;
+use tauri::{AppHandle, Emitter};
 use crate::network::protocol::InputEvent;
 
 /// Local-only inject commands (not serialized on the wire). Protocol-level events
@@ -14,64 +16,127 @@ pub enum InjectCmd {
     Text(String),
 }
 
-static INJECT_TX: OnceCell<Sender<InjectCmd>> = OnceCell::new();
+/// Bounded injector queue. An unbounded mpsc::channel allowed the queue to
+/// grow arbitrarily under clipboard/input floods; 1024 is ample for normal
+/// use and drops cleanly when a peer misbehaves.
+const INJECT_QUEUE_CAP: usize = 1024;
 
-pub fn start_injector() {
-    let (tx, rx) = mpsc::channel::<InjectCmd>();
+static INJECT_TX: OnceCell<SyncSender<InjectCmd>> = OnceCell::new();
+static INJECT_READY: AtomicBool = AtomicBool::new(false);
+// Rate-limit the "queue full" warning so a flood doesn't spam the log.
+static LAST_FULL_WARN_MS: AtomicU64 = AtomicU64::new(0);
+
+fn start_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+pub fn start_injector(app: AppHandle) {
+    let (tx, rx) = mpsc::sync_channel::<InjectCmd>(INJECT_QUEUE_CAP);
     INJECT_TX.set(tx).ok();
-
+    // Enigo is not Send on macOS (holds raw CGEventSource pointers), so we
+    // construct it inside the worker thread. A oneshot-like `init_tx` sends
+    // the result back so we can synchronously mark the injector ready or
+    // emit the `inject-unavailable` event for the UI.
+    let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
     std::thread::spawn(move || {
         let mut enigo = match Enigo::new(&Settings::default()) {
-            Ok(e) => e,
+            Ok(e) => {
+                let _ = init_tx.send(Ok(()));
+                e
+            }
             Err(e) => {
-                tracing::error!("Failed to create Enigo: {:?}", e);
+                let msg = format!("{:?}", e);
+                let _ = init_tx.send(Err(msg));
                 return;
             }
         };
         while let Ok(cmd) = rx.recv() {
             inject_cmd(&mut enigo, cmd);
         }
+        INJECT_READY.store(false, Ordering::SeqCst);
     });
+
+    match init_rx.recv() {
+        Ok(Ok(())) => {
+            INJECT_READY.store(true, Ordering::SeqCst);
+        }
+        Ok(Err(msg)) => {
+            tracing::error!("Failed to create Enigo: {}", msg);
+            INJECT_READY.store(false, Ordering::SeqCst);
+            let _ = app.emit(
+                "inject-unavailable",
+                serde_json::json!({ "error": msg }),
+            );
+        }
+        Err(_) => {
+            // Worker thread died before sending a status.
+            INJECT_READY.store(false, Ordering::SeqCst);
+            let _ = app.emit(
+                "inject-unavailable",
+                serde_json::json!({ "error": "injector thread did not start" }),
+            );
+        }
+    }
+}
+
+/// Returns whether the injector thread is up and accepting commands.
+pub fn is_ready() -> bool {
+    INJECT_READY.load(Ordering::SeqCst) && INJECT_TX.get().is_some()
+}
+
+fn try_send(cmd: InjectCmd) {
+    let Some(tx) = INJECT_TX.get() else { return };
+    match tx.try_send(cmd) {
+        Ok(_) => {}
+        Err(TrySendError::Full(_)) => {
+            let now = start_ms();
+            let last = LAST_FULL_WARN_MS.load(Ordering::Relaxed);
+            // Throttle the full-queue warning to once per second.
+            if now.saturating_sub(last) > 1000 {
+                LAST_FULL_WARN_MS.store(now, Ordering::Relaxed);
+                tracing::warn!("Inject queue full; dropping command");
+            }
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            INJECT_READY.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 pub fn process_event(event: InputEvent) {
-    if let Some(tx) = INJECT_TX.get() {
-        let _ = tx.send(InjectCmd::Remote(event));
-    }
+    if !is_ready() { return; }
+    try_send(InjectCmd::Remote(event));
 }
 
 pub fn inject_move_rel(dx: i32, dy: i32) {
-    if let Some(tx) = INJECT_TX.get() {
-        let _ = tx.send(InjectCmd::MoveRel { dx, dy });
-    }
+    if !is_ready() { return; }
+    try_send(InjectCmd::MoveRel { dx, dy });
 }
 
 /// Warp the LOCAL cursor to an absolute position. Used on relay activation to
 /// free the cursor from the screen edge so subsequent mouse motion generates
 /// real delta events rather than being clamped.
 pub fn warp_abs(x: i32, y: i32) {
-    if let Some(tx) = INJECT_TX.get() {
-        let _ = tx.send(InjectCmd::MoveAbs { x, y });
-    }
+    if !is_ready() { return; }
+    try_send(InjectCmd::MoveAbs { x, y });
 }
 
 pub fn inject_scroll(dx: i32, dy: i32) {
-    if let Some(tx) = INJECT_TX.get() {
-        let _ = tx.send(InjectCmd::Scroll { dx, dy });
-    }
+    if !is_ready() { return; }
+    try_send(InjectCmd::Scroll { dx, dy });
 }
 
 pub fn inject_button(button: u8, pressed: bool) {
-    if let Some(tx) = INJECT_TX.get() {
-        let _ = tx.send(InjectCmd::Button { button, pressed });
-    }
+    if !is_ready() { return; }
+    try_send(InjectCmd::Button { button, pressed });
 }
 
 pub fn inject_text(text: String) {
-    if let Some(tx) = INJECT_TX.get() {
-        let _ = tx.send(InjectCmd::Text(text));
-    }
+    if !is_ready() { return; }
+    try_send(InjectCmd::Text(text));
 }
+
 
 fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
     match cmd {

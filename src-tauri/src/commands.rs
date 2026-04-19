@@ -62,6 +62,11 @@ pub async fn connect_to_device(
         return Err("Already connected to a device. Disconnect first.".to_string());
     }
 
+    // User is explicitly initiating a new connection → clear the "intentional
+    // disconnect" latch so auto-reconnect is allowed to run again if this
+    // session drops unexpectedly.
+    state.reset_disconnect_flag();
+
     // Guard: mark peer as Pairing to prevent duplicate connection attempts
     let peer = {
         let mut peers = state.peers.lock();
@@ -90,9 +95,10 @@ pub async fn connect_to_device(
 pub async fn disconnect(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.mark_intentional_disconnect();
     state.set_relaying(false);
-    state.send_net(NetCommand::Disconnect);
-    *state.connected_peer.lock() = None;
-    *state.net_tx.lock() = None;
+    // Use the graceful helper so the writer task gets a chance to flush Bye
+    // before we tear net_tx down. Previously we used try_send (silent drop on
+    // full) and immediately dropped net_tx, which left Bye unsent.
+    crate::state::disconnect_gracefully(state.inner()).await;
     let _ = app.emit("disconnected", ());
     Ok(())
 }
@@ -101,6 +107,8 @@ pub async fn disconnect(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) 
 pub async fn release_cursor(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.set_relaying(false);
     *state.relay_entry.lock() = None;
+    // Reset edge timestamps so stale values don't re-activate relay instantly.
+    state.reset_edge_state();
     state.send_net(NetCommand::FocusReleased);
     // Warp the local cursor to the center of this screen so the user can see it
     let monitors = state.monitors.read().clone();
@@ -268,6 +276,10 @@ fn set_autolaunch_linux(enable: bool) {
 
 #[tauri::command]
 pub async fn accept_pairing(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Record the decision BEFORE sending on the oneshot, so the server's
+    // pairing-wait code can fall back to this value if the oneshot fires
+    // on the same tick as the timeout (Bug #15).
+    *state.last_pairing_response.lock() = Some(true);
     if let Some(tx) = state.pending_pairing.lock().take() {
         let _ = tx.send(true);
     }
@@ -276,6 +288,7 @@ pub async fn accept_pairing(state: State<'_, Arc<AppState>>) -> Result<(), Strin
 
 #[tauri::command]
 pub async fn reject_pairing(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    *state.last_pairing_response.lock() = Some(false);
     if let Some(tx) = state.pending_pairing.lock().take() {
         let _ = tx.send(false);
     }
@@ -303,13 +316,20 @@ pub async fn get_monitors(
                 .zip(m.name())
                 .map(|(a, b)| a == b)
                 .unwrap_or(false);
+            // Tauri returns position/size in PHYSICAL pixels, but rdev reports
+            // mouse coordinates in LOGICAL pixels on macOS/scaled displays.
+            // We normalize everything to logical pixels here so edge detection
+            // and cursor math downstream match rdev's coordinate system.
+            let sf = m.scale_factor().max(1e-6);
+            let pos = m.position();
+            let sz = m.size();
             MonitorInfo {
                 name: m.name().map(|s| s.as_str()).unwrap_or("Display").to_string(),
-                x: m.position().x,
-                y: m.position().y,
-                width: m.size().width,
-                height: m.size().height,
-                scale_factor: m.scale_factor(),
+                x: ((pos.x as f64) / sf).round() as i32,
+                y: ((pos.y as f64) / sf).round() as i32,
+                width: ((sz.width as f64) / sf).round() as u32,
+                height: ((sz.height as f64) / sf).round() as u32,
+                scale_factor: sf,
                 is_primary,
             }
         })

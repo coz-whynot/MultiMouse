@@ -15,6 +15,20 @@ use crate::crypto::encryption;
 use crate::input::inject;
 use crate::storage;
 
+/// Sentinel placed in `state.connected_peer` between accept and end-of-auth.
+/// Acts as an atomic compare-and-swap slot: whoever lands it first owns the
+/// controller role. Any late-arriving connection will see it and bail out.
+const PENDING_MARKER: &str = "_pending_";
+
+/// Remove the pending marker if (and only if) it's still ours. Prevents the
+/// failure path of one handshake from clearing a successful second handshake.
+fn clear_pending_if_ours(state: &AppState) {
+    let mut guard = state.connected_peer.lock();
+    if guard.as_deref() == Some(PENDING_MARKER) {
+        *guard = None;
+    }
+}
+
 pub async fn start_server(app: AppHandle, state: Arc<AppState>) {
     let addr = format!("0.0.0.0:{}", MULTIMOUSE_PORT);
     let listener = match TcpListener::bind(&addr).await {
@@ -54,15 +68,14 @@ pub async fn start_server(app: AppHandle, state: Arc<AppState>) {
                     continue;
                 }
 
-                let state_cleanup = state.clone();
-                let ip_cleanup = ip.clone();
+                // The connection_count decrement now happens inside
+                // handle_controller RIGHT AFTER the encryption handshake
+                // completes (success OR failure) — see `release_rate_slot`.
+                // Before that point the counter acts as a per-IP "in-flight
+                // handshake" limit. Legitimate fast reconnects no longer hit
+                // the cap while a prior session is still running.
                 tokio::spawn(async move {
                     handle_controller(stream, peer_addr, app, state).await;
-                    let mut counts = state_cleanup.connection_count.lock();
-                    if let Some(c) = counts.get_mut(&ip_cleanup) {
-                        *c = c.saturating_sub(1);
-                        if *c == 0 { counts.remove(&ip_cleanup); }
-                    }
                 });
             }
             Err(e) => tracing::error!("Accept error: {}", e),
@@ -80,24 +93,66 @@ pub async fn handle_relay_stream(
     handle_controller(stream, peer_addr, app, state).await;
 }
 
+/// Decrement the per-IP in-flight handshake counter. Safe to call once per
+/// connection — guards a local bool so later calls are no-ops.
+fn release_rate_slot(state: &AppState, ip: &str, released: &mut bool) {
+    if *released { return; }
+    *released = true;
+    if ip.is_empty() { return; }
+    let mut counts = state.connection_count.lock();
+    if let Some(c) = counts.get_mut(ip) {
+        *c = c.saturating_sub(1);
+        if *c == 0 { counts.remove(ip); }
+    }
+}
+
 pub async fn handle_controller(
     mut stream: tokio::net::TcpStream,
     peer_addr: SocketAddr,
     app: AppHandle,
     state: Arc<AppState>,
 ) {
+    let slot_ip = if peer_addr.port() != 0 {
+        peer_addr.ip().to_string()
+    } else {
+        String::new()
+    };
+    let mut slot_released = false;
+
     // Encryption handshake must complete before any protocol messages
     let hs = match encryption::server_handshake(&mut stream).await {
         Some(h) => h,
         None => {
             tracing::warn!("Encryption handshake failed from {}", peer_addr);
+            release_rate_slot(&state, &slot_ip, &mut slot_released);
             return;
         }
     };
     let (mut send_enc, mut recv_enc, sas_pin) = (hs.send, hs.recv, hs.sas);
 
-    // Reject if already connected (dual-user guard)
-    if state.connected_peer.lock().is_some() {
+    // Handshake is done → free the per-IP in-flight slot. After this point
+    // the dual-user check below acts as the real "only one controller"
+    // gate; orphaned handshake failures no longer keep a slot held.
+    release_rate_slot(&state, &slot_ip, &mut slot_released);
+
+    // Atomic check-and-set on `connected_peer`. Prior code did this as
+    // check-then-set with the entire handshake between the two steps, which
+    // let two concurrent clients both observe None and both become the
+    // controller. Now we take the slot via a sentinel BEFORE authenticating,
+    // then swap to the real peer id on success.
+    //
+    // The mutex guard is confined to a tiny block so it is not held across
+    // the subsequent awaits — parking_lot::MutexGuard is !Send.
+    let slot_taken = {
+        let mut guard = state.connected_peer.lock();
+        if guard.is_some() {
+            false
+        } else {
+            *guard = Some(PENDING_MARKER.to_string());
+            true
+        }
+    };
+    if !slot_taken {
         tracing::warn!("Rejecting connection from {} — already connected", peer_addr);
         send_enc_message(
             &mut stream,
@@ -109,12 +164,18 @@ pub async fn handle_controller(
 
     let msg = match read_enc_message(&mut stream, &mut recv_enc).await {
         Some(m) => m,
-        None => return,
+        None => {
+            clear_pending_if_ours(&state);
+            return;
+        }
     };
 
     let (peer_id, peer_name, peer_version) = match msg {
         Message::Hello { device_id, device_name, version } => (device_id, device_name, version),
-        _ => return,
+        _ => {
+            clear_pending_if_ours(&state);
+            return;
+        }
     };
 
     if peer_version != crate::network::protocol::PROTOCOL_VERSION {
@@ -135,6 +196,7 @@ pub async fn handle_controller(
             "connection-failed",
             serde_json::json!({ "error": reason }),
         );
+        clear_pending_if_ours(&state);
         return;
     }
 
@@ -146,7 +208,10 @@ pub async fn handle_controller(
 
     let auth_msg = match read_enc_message(&mut stream, &mut recv_enc).await {
         Some(m) => m,
-        None => return,
+        None => {
+            clear_pending_if_ours(&state);
+            return;
+        }
     };
 
     let (authenticated, new_session_key) = match auth_msg {
@@ -166,6 +231,8 @@ pub async fn handle_controller(
                 // secret, so a MitM attacker cannot make them match.
                 let (tx, rx) = oneshot::channel::<bool>();
                 *state.pending_pairing.lock() = Some(tx);
+                // Clear any stale value from a previous pairing attempt.
+                *state.last_pairing_response.lock() = None;
 
                 let _ = app.emit(
                     "pairing-request",
@@ -176,17 +243,28 @@ pub async fn handle_controller(
                     }),
                 );
 
-                // Wait up to 60 seconds for user to accept/reject
-                let accepted = tokio::time::timeout(
+                // Wait up to 60 seconds for user to accept/reject.
+                // Distinguish a real timeout from "accept/reject just landed
+                // as the deadline fired" by falling back to the separate
+                // last_pairing_response atomic when the oneshot errors.
+                let result = tokio::time::timeout(
                     tokio::time::Duration::from_secs(60),
                     rx,
                 )
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or(false);
+                .await;
+
+                let accepted = match result {
+                    // Response arrived within the window
+                    Ok(Ok(v)) => v,
+                    // Either Elapsed or oneshot dropped before sending.
+                    // Check last_pairing_response: if it's Some, the user
+                    // already clicked accept/reject — honor that decision
+                    // instead of treating it as a timeout.
+                    _ => state.last_pairing_response.lock().take().unwrap_or(false),
+                };
 
                 *state.pending_pairing.lock() = None;
+                *state.last_pairing_response.lock() = None;
 
                 let key = if accepted { Some(generate_session_key()) } else { None };
                 (accepted, key)
@@ -213,6 +291,7 @@ pub async fn handle_controller(
 
     if !authenticated {
         let _ = app.emit("pin-rejected", &peer_id);
+        clear_pending_if_ours(&state);
         return;
     }
 
@@ -222,7 +301,25 @@ pub async fn handle_controller(
             p.status = PeerStatus::Connected;
         }
     }
-    *state.connected_peer.lock() = Some(peer_id.clone());
+    // Swap the PENDING_MARKER for the real peer id. If someone else somehow
+    // raced into the slot (shouldn't be possible with the single-slot CAS
+    // above, but defensive), abort this session. Keep the guard tightly
+    // scoped — MutexGuard is !Send and we have awaits after this block.
+    let swap_ok = {
+        let mut guard = state.connected_peer.lock();
+        match guard.as_deref() {
+            Some(PENDING_MARKER) => {
+                *guard = Some(peer_id.clone());
+                true
+            }
+            Some(other) if other == peer_id => true,
+            _ => false,
+        }
+    };
+    if !swap_ok {
+        tracing::warn!("Lost the provisional slot race for {} — aborting session", peer_id);
+        return;
+    }
     state.reset_bandwidth();
     state.start_session();
     state.mark_activity();
@@ -254,33 +351,50 @@ pub async fn handle_controller(
         *state.remote_screen.lock() = Some((width, height));
     }
 
-    // Single-threaded read loop — NO select! branch that races with the read,
-    // because `read_enc_message` is not cancel-safe. The *one* exception is
-    // the `server_disconnect` notify: when it fires we break out immediately,
-    // dropping any partially-read frame intentionally (we're closing the
-    // stream anyway so the corruption doesn't matter).
-    let disconnect_signal = state.server_disconnect.clone();
-    loop {
-        let result = tokio::select! {
-            biased;
-            _ = disconnect_signal.notified() => {
-                tracing::info!("Receiver signaled disconnect — closing session from {}", peer_addr);
+    // Idle watchdog: the read loop no longer wraps read_enc_message in a
+    // timeout (which was NOT cancel-safe — a large clipboard image taking
+    // >30s to arrive would lose bytes mid-read). Instead, a separate task
+    // samples `state.last_activity` every 5 seconds and signals disconnect
+    // once no activity has been observed for 60s.
+    let watchdog_state = state.clone();
+    let watchdog_disconnect = state.server_disconnect.clone();
+    let watchdog = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            let idle = watchdog_state.last_activity.lock().elapsed();
+            if idle.as_secs() >= 60 {
+                tracing::warn!("Session idle >60s — signaling disconnect");
+                watchdog_disconnect.notify_waiters();
                 break;
             }
-            r = tokio::time::timeout(
-                tokio::time::Duration::from_secs(30),
-                read_enc_message(&mut stream, &mut recv_enc),
-            ) => r,
+        }
+    });
+
+    // Single-threaded read loop. The ONE select! branch is the
+    // `server_disconnect` notify, which is cancel-safe (Notify::notified
+    // resolves instantly). read_enc_message runs alone on its arm and is
+    // never cancelled mid-read.
+    let disconnect_signal = state.server_disconnect.clone();
+    loop {
+        let msg = tokio::select! {
+            biased;
+            _ = disconnect_signal.notified() => {
+                tracing::info!("Disconnect signaled — closing session from {}", peer_addr);
+                break;
+            }
+            r = read_enc_message(&mut stream, &mut recv_enc) => r,
         };
 
-        match result {
-            Ok(Some(msg)) => {
+        match msg {
+            Some(msg) => {
                 if let Ok(data) = serde_json::to_vec(&msg) {
                     state.add_bytes_received(data.len() as u64 + 32);
                 }
+                // Any valid message resets the idle watchdog.
+                state.mark_activity();
                 match msg {
                     Message::Input(event) => {
-                        state.mark_activity();
                         inject::process_event(event);
                     }
                     Message::FocusAcquired => {
@@ -292,10 +406,10 @@ pub async fn handle_controller(
                         let _ = app.emit("focus-released", ());
                     }
                     Message::ClipboardText { text } => {
-                        set_clipboard(text);
+                        set_clipboard(&state, text);
                     }
                     Message::ClipboardImage { width, height, bytes } => {
-                        set_clipboard_image(width, height, bytes);
+                        set_clipboard_image(&state, width, height, bytes);
                     }
                     Message::Ping { ts } => {
                         let pong = Message::Pong { ts };
@@ -308,14 +422,11 @@ pub async fn handle_controller(
                     _ => {}
                 }
             }
-            Ok(None) => break, // parse error or connection closed
-            Err(_) => {
-                tracing::warn!("Connection timed out (no message in 30s) from {}", peer_addr);
-                break;
-            }
+            None => break, // parse error or connection closed
         }
     }
 
+    watchdog.abort();
     cleanup(&app, &state, &peer_id, &peer_name, &peer_ip).await;
 }
 
@@ -324,25 +435,18 @@ fn generate_session_key() -> String {
     (0..32).map(|_| format!("{:02x}", rng.gen::<u8>())).collect()
 }
 
-fn set_clipboard(text: String) {
-    std::thread::spawn(move || {
-        if let Ok(mut ctx) = arboard::Clipboard::new() {
-            let _ = ctx.set_text(&text);
-        }
-    });
+fn set_clipboard(state: &AppState, text: String) {
+    // Route to the persistent clipboard writer. Under flood, newer messages
+    // replace older pending ones — no thread-per-message spawn.
+    if let Some(tx) = state.clipboard_tx.lock().as_ref() {
+        let _ = tx.try_send(crate::state::ClipboardSet::Text(text));
+    }
 }
 
-fn set_clipboard_image(width: u32, height: u32, bytes: Vec<u8>) {
-    std::thread::spawn(move || {
-        if let Ok(mut ctx) = arboard::Clipboard::new() {
-            let img = arboard::ImageData {
-                width: width as usize,
-                height: height as usize,
-                bytes: std::borrow::Cow::Owned(bytes),
-            };
-            let _ = ctx.set_image(img);
-        }
-    });
+fn set_clipboard_image(state: &AppState, width: u32, height: u32, bytes: Vec<u8>) {
+    if let Some(tx) = state.clipboard_tx.lock().as_ref() {
+        let _ = tx.try_send(crate::state::ClipboardSet::Image { width, height, bytes });
+    }
 }
 
 async fn cleanup(
@@ -358,11 +462,19 @@ async fn cleanup(
             p.status = PeerStatus::Available;
         }
     }
-    *state.connected_peer.lock() = None;
+    // Only clear connected_peer if it still matches this session's id — avoids
+    // clobbering a concurrent reconnect that already re-populated it.
+    {
+        let mut guard = state.connected_peer.lock();
+        if guard.as_deref() == Some(peer_id) || guard.as_deref() == Some(PENDING_MARKER) {
+            *guard = None;
+        }
+    }
     *state.remote_screen.lock() = None;
     state.set_relaying(false);
     state.set_controlled(false);
     state.reset_bandwidth();
+    state.reset_edge_state();
 
     storage::append_audit(storage::AuditEntry {
         timestamp_unix: std::time::SystemTime::now()

@@ -10,7 +10,9 @@ pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Hard cap on clipboard text bytes so a peer can't force us to buffer
 /// unbounded strings. 64 KiB is well beyond typical copy-paste text.
-const CLIPBOARD_TEXT_MAX: usize = 64 * 1024;
+/// Enforced at the SEND side (truncate before enqueuing) so that an oversize
+/// message does not terminate the session at the receiver.
+pub const CLIPBOARD_TEXT_MAX: usize = 64 * 1024;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data")]
@@ -132,12 +134,11 @@ pub async fn read_enc_message<R: AsyncRead + Unpin>(
     reader.read_exact(&mut buf).await.ok()?;
     let plain = dec.open(&buf)?;
     let msg: Message = serde_json::from_slice(&plain).ok()?;
-    // Per-type size caps: the outer frame limit is 2 MiB to accommodate
-    // clipboard images, but text-shaped messages should never be that large.
-    match &msg {
-        Message::ClipboardText { text } if text.len() > CLIPBOARD_TEXT_MAX => None,
-        _ => Some(msg),
-    }
+    // Size enforcement happens on the SEND side now: the outer 2 MiB frame
+    // still caps images/payloads, but oversize clipboard text is truncated
+    // before enqueue (see capture::sync_clipboard_async) so a large paste
+    // never closes the session on the receiver.
+    Some(msg)
 }
 
 pub async fn send_enc_message<W: AsyncWrite + Unpin>(

@@ -49,6 +49,15 @@ export default function App() {
   const reconnectDismissTimer = useRef<number | null>(null);
   const peersRef = useRef(peers);
   peersRef.current = peers;
+  // Tracks the most recent push-event timestamp so the 3s poll can avoid
+  // overwriting event-driven state during narrow transition windows. When a
+  // focus/relay/connection event fires and then the poll reads the backend
+  // ~ms later, the backend's fresh value should win — but if the backend
+  // command ran BEFORE the event (wrong-ordering from its perspective), the
+  // poll would flicker the UI back. We gate the relay/connection/control
+  // fields on a 500ms event-freshness window.
+  const lastEventAt = useRef<number>(0);
+  const markEvent = () => { lastEventAt.current = Date.now(); };
 
   const refresh = async () => {
     try {
@@ -58,7 +67,26 @@ export default function App() {
         invoke<any>('get_settings'),
       ]);
       setPeers(devices);
-      setStatus(stat);
+      // If an event fired within the last 500ms, keep the event-driven
+      // connection/relay/control fields that are already in the store and
+      // only merge the rest of the status payload. Otherwise accept the
+      // poll result wholesale.
+      const sinceEvent = Date.now() - lastEventAt.current;
+      if (sinceEvent < 500) {
+        const existing = useStore.getState().status;
+        if (existing) {
+          setStatus({
+            ...stat,
+            relaying: existing.relaying,
+            is_controlled: existing.is_controlled,
+            connected_peer: existing.connected_peer,
+          });
+        } else {
+          setStatus(stat);
+        }
+      } else {
+        setStatus(stat);
+      }
       setSettings(sett);
     } catch (e) {
       console.error('refresh error', e);
@@ -86,6 +114,7 @@ export default function App() {
     const unlisten = Promise.all([
       listen('peers-updated', refresh),
       listen('connected', () => {
+        markEvent();
         setShownPin(null);
         setReconnectState(null);
         if (reconnectDismissTimer.current != null) {
@@ -94,7 +123,28 @@ export default function App() {
         }
         refresh();
       }),
-      listen('disconnected', () => { setShownPin(null); refresh(); }),
+      listen('disconnected', () => {
+        markEvent();
+        setShownPin(null);
+        // Optimistically clear event-driven fields so the UI updates instantly.
+        const existing = useStore.getState().status;
+        if (existing) {
+          setStatus({
+            ...existing,
+            relaying: false,
+            is_controlled: false,
+            connected_peer: null,
+          });
+        }
+        refresh();
+      }),
+      listen('relay-started', () => {
+        markEvent();
+        const existing = useStore.getState().status;
+        if (existing) {
+          setStatus({ ...existing, relaying: true });
+        }
+      }),
       listen<{ peer_id: string; attempt: number; max_attempts?: number }>(
         'reconnect-attempt',
         (e) => {
@@ -119,8 +169,22 @@ export default function App() {
         }));
         scheduleReconnectDismiss(4000);
       }),
-      listen('focus-acquired', refresh),
-      listen('focus-released', refresh),
+      listen('focus-acquired', () => {
+        markEvent();
+        const existing = useStore.getState().status;
+        if (existing) {
+          setStatus({ ...existing, is_controlled: true });
+        }
+        refresh();
+      }),
+      listen('focus-released', () => {
+        markEvent();
+        const existing = useStore.getState().status;
+        if (existing) {
+          setStatus({ ...existing, is_controlled: false, relaying: false });
+        }
+        refresh();
+      }),
       listen<PairingRequest>('pairing-request', (e) => setPairingRequest(e.payload)),
       listen<{ peer_id: string; pin: string }>('pin-shown', (e) => setShownPin(e.payload?.pin ?? null)),
       listen('pin-rejected', () => {

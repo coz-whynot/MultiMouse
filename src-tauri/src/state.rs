@@ -124,8 +124,18 @@ pub struct AppState {
     pub monitors: RwLock<Vec<MonitorInfo>>,
     /// Oneshot channel for accept/reject of an incoming pairing request
     pub pending_pairing: Mutex<Option<oneshot::Sender<bool>>>,
-    /// Per-IP connection counts for rate limiting
+    /// Records the user's accept/reject decision even after the oneshot Sender
+    /// has been taken. Lets us distinguish a real timeout from "accepted just
+    /// as the deadline fired" in the server handshake path.
+    pub last_pairing_response: Mutex<Option<bool>>,
+    /// Per-IP in-flight handshake counts for rate limiting. Decremented as
+    /// soon as the handshake completes (success OR failure), so fast legit
+    /// reconnects do not get blocked by long-running sessions.
     pub connection_count: Mutex<HashMap<String, u32>>,
+    /// mDNS fullname → peer id, populated on ServiceResolved. On ServiceRemoved
+    /// we look up the id here so we retain by id — two peers sharing a display
+    /// name no longer clobber each other.
+    pub mdns_fullname_to_id: Mutex<HashMap<String, String>>,
     /// Remote machine's screen size (received from server on connect)
     pub remote_screen: Mutex<Option<(f64, f64)>>,
     /// Cursor positions at the moment relay was activated: (local_x, local_y, remote_entry_x, remote_entry_y)
@@ -155,6 +165,25 @@ pub struct AppState {
     /// Notify signal raised when the server should break out of its read loop
     /// immediately — used to let the receiver kick the controller out via Esc.
     pub server_disconnect: std::sync::Arc<tokio::sync::Notify>,
+    /// Timestamp of the first edge touch for dwell-based relay activation.
+    /// Moved off a thread-local so it can be cleared on every disconnect; a
+    /// stale value after reconnect was causing instant-activate or missed-dwell.
+    pub edge_first_touch: Mutex<Option<Instant>>,
+    /// Timestamp of the most recent relay release. Used to debounce edge
+    /// re-activation. Also moved off thread_local so it resets on disconnect.
+    pub last_release: Mutex<Option<Instant>>,
+    /// Bounded channel to a persistent clipboard-writer thread. One pending
+    /// message at a time — older messages are dropped under flood so we never
+    /// spawn a thread per clipboard event.
+    pub clipboard_tx: Mutex<Option<std::sync::mpsc::SyncSender<ClipboardSet>>>,
+}
+
+/// Commands for the persistent clipboard-writer thread. Only the latest
+/// pending message is retained (older gets drained before push).
+#[derive(Clone, Debug)]
+pub enum ClipboardSet {
+    Text(String),
+    Image { width: u32, height: u32, bytes: Vec<u8> },
 }
 
 impl AppState {
@@ -179,7 +208,9 @@ impl AppState {
             active_transfers: Mutex::new(Vec::new()),
             monitors: RwLock::new(Vec::new()),
             pending_pairing: Mutex::new(None),
+            last_pairing_response: Mutex::new(None),
             connection_count: Mutex::new(HashMap::new()),
+            mdns_fullname_to_id: Mutex::new(HashMap::new()),
             remote_screen: Mutex::new(None),
             relay_entry: Mutex::new(None),
             mdns: Mutex::new(None),
@@ -194,7 +225,18 @@ impl AppState {
             session_start: Mutex::new(None),
             last_activity: Mutex::new(Instant::now()),
             server_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
+            edge_first_touch: Mutex::new(None),
+            last_release: Mutex::new(None),
+            clipboard_tx: Mutex::new(None),
         }
+    }
+
+    /// Reset the edge-dwell and release-debounce timers. MUST be called on
+    /// every disconnect path — stale values across reconnect caused either
+    /// instant relay activation or a skipped dwell window.
+    pub fn reset_edge_state(&self) {
+        *self.edge_first_touch.lock() = None;
+        *self.last_release.lock() = None;
     }
 
     /// Kick the server's main read loop — used by the receiver's Esc escape hatch
@@ -259,4 +301,31 @@ impl AppState {
             let _ = tx.try_send(cmd);
         }
     }
+
+    /// Clone the current net_tx sender, if any. Callers can then `.send().await`
+    /// on the clone without holding the state mutex, which is necessary for
+    /// graceful-disconnect flows where we want to await the channel.
+    pub fn net_tx_clone(&self) -> Option<mpsc::Sender<NetCommand>> {
+        self.net_tx.lock().clone()
+    }
+}
+
+/// Gracefully tear down the current session: send `Disconnect` to the writer
+/// task, give it a brief grace period to flush `Bye`, then drop `net_tx` and
+/// clear the connected peer. Used by user-initiated disconnect, tray
+/// "Disconnect", and idle auto-lock — replacing the old fire-and-forget path
+/// that dropped `Bye` whenever the channel was momentarily full.
+pub async fn disconnect_gracefully(state: &AppState) {
+    if let Some(tx) = state.net_tx_clone() {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tx.send(NetCommand::Disconnect),
+        )
+        .await;
+        // Give the writer task a moment to actually flush Bye onto the wire.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    *state.net_tx.lock() = None;
+    *state.connected_peer.lock() = None;
+    state.reset_edge_state();
 }

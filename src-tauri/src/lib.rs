@@ -32,7 +32,9 @@ pub fn run() {
             let state = Arc::new(AppState::new());
             app.manage(state.clone());
 
-            // Populate monitor info at startup
+            // Populate monitor info at startup. All geometry is stored in
+            // LOGICAL pixels to match rdev's mouse-coordinate space (see
+            // Bug #14 comment in commands::get_monitors).
             if let Some(win) = app.get_webview_window("main") {
                 if let Ok(primary) = win.primary_monitor() {
                     if let Ok(available) = win.available_monitors() {
@@ -45,13 +47,16 @@ pub fn run() {
                                     .zip(m.name())
                                     .map(|(a, b)| a == b)
                                     .unwrap_or(false);
+                                let sf = m.scale_factor().max(1e-6);
+                                let pos = m.position();
+                                let sz = m.size();
                                 state::MonitorInfo {
                                     name: m.name().map(|s| s.as_str()).unwrap_or("Display").to_string(),
-                                    x: m.position().x,
-                                    y: m.position().y,
-                                    width: m.size().width,
-                                    height: m.size().height,
-                                    scale_factor: m.scale_factor(),
+                                    x: ((pos.x as f64) / sf).round() as i32,
+                                    y: ((pos.y as f64) / sf).round() as i32,
+                                    width: ((sz.width as f64) / sf).round() as u32,
+                                    height: ((sz.height as f64) / sf).round() as u32,
+                                    scale_factor: sf,
                                     is_primary,
                                 }
                             })
@@ -109,8 +114,9 @@ pub fn run() {
                 rt.block_on(network::start_all_services(app_handle, state_bg));
             });
 
-            input::inject::start_injector();
+            input::inject::start_injector(app.handle().clone());
             input::capture::start(app.handle().clone(), state.clone());
+            start_clipboard_writer(state.clone());
 
             // Periodically refresh monitor info so edge detection stays accurate when
             // displays are plugged/unplugged. 5s is cheap and updates feel instant.
@@ -148,9 +154,12 @@ pub fn run() {
                     && state_idle.connected_peer.lock().is_some()
                 {
                     tracing::info!("Idle auto-lock triggered ({} min)", minutes);
-                    state_idle.send_net(crate::network::protocol::NetCommand::Disconnect);
-                    *state_idle.connected_peer.lock() = None;
-                    *state_idle.net_tx.lock() = None;
+                    // Graceful disconnect so Bye reaches the peer and they
+                    // also drop the session instead of waiting for a TCP timeout.
+                    let state_for_task = state_idle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::state::disconnect_gracefully(&state_for_task).await;
+                    });
                     let _ = app_idle.emit("idle-lock-triggered", ());
                     let _ = app_idle.emit("disconnected", ());
                 }
@@ -207,6 +216,37 @@ pub fn run() {
         .expect("error while running MultiMouse");
 }
 
+/// Spawn the persistent clipboard-writer thread. One pending message at a
+/// time — newer messages replace the pending one. Replaces the old pattern
+/// of `std::thread::spawn` per incoming clipboard event, which caused
+/// dozens of contending threads under clipboard flood.
+fn start_clipboard_writer(state: Arc<AppState>) {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<state::ClipboardSet>(4);
+    *state.clipboard_tx.lock() = Some(tx);
+    std::thread::spawn(move || {
+        while let Ok(mut msg) = rx.recv() {
+            // Drain any queued messages — only the newest clipboard state matters.
+            while let Ok(next) = rx.try_recv() {
+                msg = next;
+            }
+            let Ok(mut ctx) = arboard::Clipboard::new() else { continue };
+            match msg {
+                state::ClipboardSet::Text(text) => {
+                    let _ = ctx.set_text(&text);
+                }
+                state::ClipboardSet::Image { width, height, bytes } => {
+                    let img = arboard::ImageData {
+                        width: width as usize,
+                        height: height as usize,
+                        bytes: std::borrow::Cow::Owned(bytes),
+                    };
+                    let _ = ctx.set_image(img);
+                }
+            }
+        }
+    });
+}
+
 fn refresh_monitors(app: &AppHandle, state: &Arc<AppState>) {
     let Some(win) = app.get_webview_window("main") else { return };
     let primary = win.primary_monitor().ok().flatten();
@@ -220,13 +260,17 @@ fn refresh_monitors(app: &AppHandle, state: &Arc<AppState>) {
                 .zip(m.name())
                 .map(|(a, b)| a == b)
                 .unwrap_or(false);
+            // LOGICAL pixels (see Bug #14 note in commands::get_monitors).
+            let sf = m.scale_factor().max(1e-6);
+            let pos = m.position();
+            let sz = m.size();
             state::MonitorInfo {
                 name: m.name().map(|s| s.as_str()).unwrap_or("Display").to_string(),
-                x: m.position().x,
-                y: m.position().y,
-                width: m.size().width,
-                height: m.size().height,
-                scale_factor: m.scale_factor(),
+                x: ((pos.x as f64) / sf).round() as i32,
+                y: ((pos.y as f64) / sf).round() as i32,
+                width: ((sz.width as f64) / sf).round() as u32,
+                height: ((sz.height as f64) / sf).round() as u32,
+                scale_factor: sf,
                 is_primary,
             }
         })
@@ -234,15 +278,35 @@ fn refresh_monitors(app: &AppHandle, state: &Arc<AppState>) {
     *state.monitors.write() = monitors;
 }
 
-/// Graceful shutdown: deregister mDNS and drop its daemon so other devices on the LAN
-/// see us disappear immediately instead of waiting for the service TTL to expire.
+/// Graceful shutdown: flush any pending Bye to the peer, signal the trackpad
+/// server to stop, deregister mDNS, and only THEN let the caller exit(0).
+/// The old implementation called exit(0) immediately after a try_send,
+/// which killed the writer task before it could flush Bye and killed the
+/// trackpad server before it could close its sockets.
 fn shutdown_services(app: &AppHandle) {
     if let Some(state) = app.try_state::<Arc<AppState>>() {
+        let state_clone = state.inner().clone();
+        state_clone.mark_intentional_disconnect();
+
+        // Flush Bye to the peer gracefully, under a blocking runtime so we
+        // can wait for the writer task without needing an async caller.
+        tauri::async_runtime::block_on(async move {
+            crate::state::disconnect_gracefully(&state_clone).await;
+        });
+
+        // Tell the trackpad server to close its listening sockets.
+        if let Some(tx) = state.trackpad_shutdown.lock().take() {
+            let _ = tx.send(());
+        }
+
+        // Deregister mDNS so peers on the LAN see us disappear immediately
+        // instead of having to wait for the service TTL to expire.
         if let Some(mdns) = state.mdns.lock().take() {
             let _ = mdns.shutdown();
         }
-        // Best-effort disconnect from any active peer
-        state.send_net(network::protocol::NetCommand::Disconnect);
+
+        // Give sockets a moment to actually close on the wire.
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
@@ -315,20 +379,25 @@ fn toggle_gaming_mode(app: &AppHandle) {
     }
 }
 
-/// Tray-menu "Disconnect" — fully drops the session.
+/// Tray-menu "Disconnect" — fully drops the session, flushing Bye first.
 fn emergency_disconnect(app: &AppHandle) {
     use tauri::Emitter;
     if let Some(state) = app.try_state::<Arc<AppState>>() {
         state.mark_intentional_disconnect();
         state.set_relaying(false);
         *state.relay_entry.lock() = None;
-        state.send_net(network::protocol::NetCommand::Disconnect);
-        *state.connected_peer.lock() = None;
-        *state.net_tx.lock() = None;
-        let monitors = state.monitors.read().clone();
-        let (min_x, min_y, max_x, max_y) = screen::layout::virtual_bounds(&monitors);
-        input::inject::warp_abs(((min_x + max_x) / 2.0) as i32, ((min_y + max_y) / 2.0) as i32);
-        let _ = app.emit("disconnected", ());
+
+        // Graceful disconnect: spawn onto the async runtime and DO NOT block
+        // the tray thread (menu callbacks must return quickly).
+        let state_clone = state.inner().clone();
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::state::disconnect_gracefully(&state_clone).await;
+            let monitors = state_clone.monitors.read().clone();
+            let (min_x, min_y, max_x, max_y) = screen::layout::virtual_bounds(&monitors);
+            input::inject::warp_abs(((min_x + max_x) / 2.0) as i32, ((min_y + max_y) / 2.0) as i32);
+            let _ = app_clone.emit("disconnected", ());
+        });
         tracing::info!("Emergency disconnect from tray");
     }
 }

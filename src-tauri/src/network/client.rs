@@ -160,7 +160,11 @@ pub async fn connect_stream(
         }
     }
     *state.connected_peer.lock() = Some(peer.id.clone());
-    state.reset_disconnect_flag();
+    // NOTE: the intentional_disconnect flag is intentionally NOT reset here.
+    // It is cleared only in `connect_to_device` at the point the user
+    // explicitly initiates a new connection. Resetting here created a tiny
+    // race window where hitting Disconnect right after "connected" fired
+    // would be ignored by auto-reconnect.
     *state.last_peer_info.lock() = Some(peer.clone());
     state.reset_bandwidth();
     state.start_session();
@@ -203,51 +207,56 @@ pub async fn connect_stream(
         }
     });
 
-    let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+    // Ping runs in a separate task so it never races with the read loop.
+    // The old tokio::select! mixing ping_interval.tick() with read_enc_message
+    // was unsafe — read_enc_message is NOT cancel-safe (two read_exact calls
+    // with allocation in between), so a ping firing mid-read would drop bytes
+    // and the next read would fail to decrypt, dropping the session every ~5s.
     let state_ping = state.clone();
-    let peer_id_ping = peer.id.clone();
+    let ping_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        // Skip the immediate first tick — we just connected, no need to ping yet.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if state_ping.net_tx.lock().is_none() { break; }
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            state_ping.send_net(NetCommand::Ping(ts));
+        }
+    });
 
-    loop {
-        tokio::select! {
-            _ = ping_interval.tick() => {
-                // Stop pinging if disconnected
-                if state_ping.net_tx.lock().is_none() { break; }
-                let ts = SystemTime::now()
+    // Single-threaded read loop — never cancelled mid-read. On stream close
+    // read_enc_message returns None and we fall through to cleanup.
+    let peer_id_ping = peer.id.clone();
+    while let Some(msg) = read_enc_message(&mut reader, &mut recv_enc).await {
+        if let Ok(data) = serde_json::to_vec(&msg) {
+            state.add_bytes_received(data.len() as u64 + 32);
+        }
+        match msg {
+            Message::Bye => break,
+            Message::Pong { ts } => {
+                let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                state_ping.send_net(NetCommand::Ping(ts));
-            }
-            result = read_enc_message(&mut reader, &mut recv_enc) => {
-                match result {
-                    Some(msg) => {
-                        if let Ok(data) = serde_json::to_vec(&msg) {
-                            state_ping.add_bytes_received(data.len() as u64 + 32);
-                        }
-                        match msg {
-                            Message::Bye => break,
-                            Message::Pong { ts } => {
-                                let now = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis() as u64;
-                                let rtt_ms = (now.saturating_sub(ts) / 2) as u32;
-                                let mut peers = state_ping.peers.lock();
-                                if let Some(p) = peers.iter_mut().find(|p| p.id == peer_id_ping) {
-                                    p.ping_ms = Some(rtt_ms);
-                                }
-                            }
-                            Message::ActiveWindow { app_name } => {
-                                let _ = app.emit("remote-active-window", app_name);
-                            }
-                            _ => {}
-                        }
-                    }
-                    None => break,
+                let rtt_ms = (now.saturating_sub(ts) / 2) as u32;
+                let mut peers = state.peers.lock();
+                if let Some(p) = peers.iter_mut().find(|p| p.id == peer_id_ping) {
+                    p.ping_ms = Some(rtt_ms);
                 }
             }
+            Message::ActiveWindow { app_name } => {
+                let _ = app.emit("remote-active-window", app_name);
+            }
+            _ => {}
         }
     }
+
+    // Stop the ping task so it doesn't outlive the session.
+    ping_task.abort();
 
     {
         let mut peers = state.peers.lock();
@@ -261,6 +270,7 @@ pub async fn connect_stream(
     *state.relay_entry.lock() = None;
     state.set_relaying(false);
     state.reset_bandwidth();
+    state.reset_edge_state();
     let _ = app.emit("disconnected", ());
 
     // Auto-reconnect if this was an unclean disconnect and we have a stored session key

@@ -15,10 +15,11 @@ const MOUSE_MOVE_INTERVAL_MS: u128 = 8;
 /// to pull away from the edge without immediately re-triggering relay.
 const RELEASE_DEBOUNCE_MS: u128 = 800;
 
-thread_local! {
-    static EDGE_FIRST_TOUCH: Cell<Option<Instant>> = Cell::new(None);
-    static LAST_RELEASE: Cell<Option<Instant>> = Cell::new(None);
-}
+// NOTE: edge-dwell + release-debounce timestamps are stored on AppState
+// (state.edge_first_touch, state.last_release) instead of thread_local!.
+// That way every disconnect path can reset them via state.reset_edge_state(),
+// which prevents stale values from triggering instant relay or a skipped
+// dwell window immediately after a reconnect.
 
 /// Returns true if `key` is the trigger key for the configured hotkey.
 fn is_release_key(key: &rdev::Key, hotkey: &str) -> bool {
@@ -49,7 +50,7 @@ fn try_toggle_gaming_mode(event: &Event, state: &AppState, app: &AppHandle) -> b
         s.gaming_mode
     };
     // Clear any lingering edge-dwell so flipping off mid-game doesn't instantly fire.
-    EDGE_FIRST_TOUCH.with(|t| t.set(None));
+    *state.edge_first_touch.lock() = None;
     let snapshot = state.settings.read().clone();
     std::thread::spawn(move || crate::storage::save_settings(&snapshot));
     let _ = app.emit("gaming-mode-changed", enabled);
@@ -98,7 +99,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
             let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
             inject::warp_abs(((min_x + max_x) / 2.0) as i32, ((min_y + max_y) / 2.0) as i32);
             sync_clipboard_async(state);
-            LAST_RELEASE.with(|t| t.set(Some(Instant::now())));
+            *state.last_release.lock() = Some(Instant::now());
             let _ = app.emit("focus-released", ());
             tracing::info!("Relay released via Escape");
             return None;
@@ -168,7 +169,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 (s.transition_edge.clone(), s.edge_dwell_ms as u128, s.gaming_mode)
             };
             if gaming {
-                EDGE_FIRST_TOUCH.with(|t| t.set(None));
+                *state.edge_first_touch.lock() = None;
                 return Some(event);
             }
             let monitors = state.monitors.read().clone();
@@ -178,9 +179,11 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
             // and the user's cursor would freeze with nothing being sent anywhere.
             let can_send = state.net_tx.lock().is_some();
             // Block re-activation for a short window after a release.
-            let recently_released = LAST_RELEASE.with(|t| {
-                t.get().map(|r| r.elapsed().as_millis() < RELEASE_DEBOUNCE_MS).unwrap_or(false)
-            });
+            let recently_released = state
+                .last_release
+                .lock()
+                .map(|r| r.elapsed().as_millis() < RELEASE_DEBOUNCE_MS)
+                .unwrap_or(false);
             let at_edge = can_send
                 && !recently_released
                 && layout::is_at_edge(x, y, &edge, &monitors)
@@ -188,14 +191,15 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
 
             if at_edge {
                 let now = Instant::now();
-                let should_activate = EDGE_FIRST_TOUCH.with(|t| {
-                    match t.get() {
-                        None => { t.set(Some(now)); false }
+                let should_activate = {
+                    let mut guard = state.edge_first_touch.lock();
+                    match *guard {
+                        None => { *guard = Some(now); false }
                         Some(first) => now.duration_since(first).as_millis() >= dwell_ms,
                     }
-                });
+                };
                 if should_activate {
-                    EDGE_FIRST_TOUCH.with(|t| t.set(None));
+                    *state.edge_first_touch.lock() = None;
                     let (entry_x, entry_y) = compute_entry_point(x, y, &edge, &monitors, state);
 
                     // Warp the local cursor off the edge to the screen center so the OS
@@ -218,7 +222,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                     tracing::debug!("Relay ON — cursor at {} edge ({x:.0}, {y:.0}) → warped local to center ({center_x:.0}, {center_y:.0}), remote entry ({entry_x:.0}, {entry_y:.0})", edge);
                 }
             } else {
-                EDGE_FIRST_TOUCH.with(|t| t.set(None));
+                *state.edge_first_touch.lock() = None;
             }
         }
 
@@ -282,7 +286,7 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                 (s.transition_edge.clone(), s.edge_dwell_ms as u128, s.gaming_mode)
             };
             if gaming {
-                EDGE_FIRST_TOUCH.with(|t| t.set(None));
+                *state.edge_first_touch.lock() = None;
                 return;
             }
             let monitors = state.monitors.read().clone();
@@ -291,14 +295,15 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
 
             if at_edge {
                 let now = Instant::now();
-                let should_activate = EDGE_FIRST_TOUCH.with(|t| {
-                    match t.get() {
-                        None => { t.set(Some(now)); false }
+                let should_activate = {
+                    let mut guard = state.edge_first_touch.lock();
+                    match *guard {
+                        None => { *guard = Some(now); false }
                         Some(first) => now.duration_since(first).as_millis() >= dwell_ms,
                     }
-                });
+                };
                 if should_activate {
-                    EDGE_FIRST_TOUCH.with(|t| t.set(None));
+                    *state.edge_first_touch.lock() = None;
                     let (entry_x, entry_y) = compute_entry_point(x, y, &edge, &monitors, state);
                     let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
                     let center_x = (min_x + max_x) / 2.0;
@@ -311,7 +316,7 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                     sync_clipboard_async(state);
                 }
             } else {
-                EDGE_FIRST_TOUCH.with(|t| t.set(None));
+                *state.edge_first_touch.lock() = None;
             }
         }
     }
@@ -412,7 +417,21 @@ fn sync_clipboard_async(state: &AppState) {
     if let Some(tx) = tx {
         std::thread::spawn(move || {
             let Ok(mut ctx) = arboard::Clipboard::new() else { return };
-            if let Ok(text) = ctx.get_text() {
+            if let Ok(mut text) = ctx.get_text() {
+                // Truncate oversize clipboard text on the SEND side so we never
+                // force the receiver to drop the session on a large paste.
+                if text.len() > crate::network::protocol::CLIPBOARD_TEXT_MAX {
+                    // Find the nearest valid UTF-8 boundary at/below the cap.
+                    let mut cutoff = crate::network::protocol::CLIPBOARD_TEXT_MAX;
+                    while cutoff > 0 && !text.is_char_boundary(cutoff) {
+                        cutoff -= 1;
+                    }
+                    text.truncate(cutoff);
+                    tracing::warn!(
+                        "Clipboard text exceeded {} bytes; truncated before send",
+                        crate::network::protocol::CLIPBOARD_TEXT_MAX
+                    );
+                }
                 let _ = tx.try_send(NetCommand::ClipboardText(text));
                 return;
             }

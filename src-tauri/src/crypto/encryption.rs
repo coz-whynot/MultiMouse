@@ -29,14 +29,25 @@ impl Channel {
     }
 
     /// Encrypt plaintext. Output = 12-byte-nonce + ciphertext + 16-byte-tag.
-    /// Returns None on the pathological AEAD failure (plaintext larger than
-    /// ~256 GiB); callers drop the message rather than panic the io task.
+    /// Returns None on pathological AEAD failure, OR when the nonce counter
+    /// is exhausted (`u64::MAX`). Callers treat `None` as a signal to drop
+    /// the session — at that point the session MUST be renegotiated rather
+    /// than reused, because reusing a nonce with the same key is catastrophic
+    /// for ChaCha20Poly1305 confidentiality and authenticity.
+    ///
+    /// Ordering matters: we encrypt first and only increment the counter on
+    /// success, so a transient cipher error does not silently burn a nonce.
     pub fn seal(&mut self, plaintext: &[u8]) -> Option<Vec<u8>> {
+        // Refuse to encrypt if the next counter would overflow — never reuse a nonce.
+        if self.nonce_ctr == u64::MAX {
+            return None;
+        }
         let mut nonce_bytes = [0u8; NONCE_LEN];
         nonce_bytes[..8].copy_from_slice(&self.nonce_ctr.to_le_bytes());
-        self.nonce_ctr += 1;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ct = self.cipher.encrypt(nonce, plaintext).ok()?;
+        // Only bump the counter once encryption has actually succeeded.
+        self.nonce_ctr += 1;
         let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
         out.extend_from_slice(&nonce_bytes);
         out.extend_from_slice(&ct);

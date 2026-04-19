@@ -73,8 +73,8 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                     .map(|a| a.to_string())
                     .unwrap_or_default();
 
-                let name = info
-                    .get_fullname()
+                let fullname = info.get_fullname().to_string();
+                let name = fullname
                     .split('.')
                     .next()
                     .unwrap_or("Unknown")
@@ -96,6 +96,13 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                     last_seen: now_unix,
                 };
 
+                // Track fullname → id so ServiceRemoved removes the right
+                // peer even when two devices share a display name.
+                state
+                    .mdns_fullname_to_id
+                    .lock()
+                    .insert(fullname, peer_id.clone());
+
                 let mut peers = state.peers.lock();
                 if let Some(existing) = peers.iter_mut().find(|p| p.id == peer_id) {
                     existing.addr = peer.addr.clone();
@@ -109,13 +116,18 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                 let _ = app.emit("peers-updated", ());
             }
             ServiceEvent::ServiceRemoved(_, fullname) => {
-                let name_part = fullname.split('.').next().unwrap_or("").replace('_', " ");
-                let mut peers = state.peers.lock();
-                let before = peers.len();
-                peers.retain(|p| p.name != name_part);
-                if peers.len() != before {
-                    drop(peers);
-                    let _ = app.emit("peers-updated", ());
+                // Look up the peer id we recorded at resolve time. Matching
+                // by display-name alone caused two devices with the same
+                // name to evict each other on any Removed event.
+                let removed_id = state.mdns_fullname_to_id.lock().remove(&fullname);
+                if let Some(id) = removed_id {
+                    let mut peers = state.peers.lock();
+                    let before = peers.len();
+                    peers.retain(|p| p.id != id);
+                    if peers.len() != before {
+                        drop(peers);
+                        let _ = app.emit("peers-updated", ());
+                    }
                 }
             }
             _ => {}

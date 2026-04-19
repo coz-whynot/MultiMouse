@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(cargo check)",
+      "Bash(cargo check *)",
+      "Bash(npm run build)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in */src-tauri/*.rs) (cd \"$CLAUDE_PROJECT_DIR/src-tauri\" && \"$HOME/.cargo/bin/cargo\" check --message-format=short 2>&1 | tail -40) >&2 ;; */src/*.ts|*/src/*.tsx) (cd \"$CLAUDE_PROJECT_DIR\" && npx --no-install tsc --noEmit 2>&1 | tail -20) >&2 ;; esac",
+            "timeout": 180,
+            "statusMessage": "verifying build"
+          }
+        ]
+      }
+    ]
+  }
+}
