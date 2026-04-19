@@ -384,10 +384,13 @@ unsafe extern "C" fn raw_tap_callback(
     let lw = (bx1 - bx0).max(1.0);
     let lh = (by1 - by0).max(1.0);
     let remote = *state.remote_screen.lock();
+    // Sensitivity multiplier (user setting, clamped). Folded into the
+    // local→remote scale so we don't do an extra multiply per event.
+    let sensitivity = state.settings.read().mouse_sensitivity.clamp(0.1, 5.0);
     let (sx, sy) = if let Some((rw, rh)) = remote {
-        (rw / lw, rh / lh)
+        ((rw / lw) * sensitivity, (rh / lh) * sensitivity)
     } else {
-        (1.0, 1.0)
+        (sensitivity, sensitivity)
     };
     let wire_dx = dx_phys * sx;
     let wire_dy = dy_phys * sy;

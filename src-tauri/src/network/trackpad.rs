@@ -308,8 +308,8 @@ fn dispatch(msg: PhoneMsg) {
         PhoneMsg::Key { key } => {
             // Send the key down/up pair via the existing protocol path
             use crate::network::protocol::InputEvent;
-            inject::process_event(InputEvent::Key { key: key.clone(), pressed: true });
-            inject::process_event(InputEvent::Key { key, pressed: false });
+            inject::process_event(InputEvent::Key { key: key.clone(), pressed: true, unicode: None });
+            inject::process_event(InputEvent::Key { key, pressed: false, unicode: None });
         }
     }
 }

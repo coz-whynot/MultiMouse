@@ -143,7 +143,20 @@ pub enum InputEvent {
     MouseMoveRel { dx: f64, dy: f64 },
     MouseButton { button: u8, pressed: bool },
     MouseScroll { dx: i64, dy: i64 },
-    Key { key: String, pressed: bool },
+    /// Keyboard event. `key` is rdev's platform-Debug name (e.g. `"KeyA"`,
+    /// `"ShiftLeft"`) used to drive the receiver's keycode lookup. `unicode`
+    /// is the layout-translated character(s) the sender derived from its
+    /// current keyboard layout (e.g. `"a"` for the KeyA press on US-QWERTY,
+    /// `"é"` on French, `"И"` on Russian). Optional for backward compat
+    /// with v0.3.0–v0.3.5 senders; new receivers use it as a fallback when
+    /// the key-name isn't in their local keycode table (covers rdev Debug-
+    /// format drift and layout mismatches between sender and receiver).
+    Key {
+        key: String,
+        pressed: bool,
+        #[serde(default)]
+        unicode: Option<String>,
+    },
 }
 
 /// Commands sent from input capture / commands layer to the network writer task.
@@ -229,12 +242,32 @@ mod tests {
             InputEvent::MouseMoveRel { dx: -3.5, dy: 7.0 },
             InputEvent::MouseButton { button: 1, pressed: true },
             InputEvent::MouseScroll { dx: 0, dy: -1 },
-            InputEvent::Key { key: "KeyA".into(), pressed: false },
+            InputEvent::Key { key: "KeyA".into(), pressed: false, unicode: None },
+            InputEvent::Key { key: "KeyA".into(), pressed: true, unicode: Some("a".into()) },
         ];
         for ev in cases {
             let bytes = serde_json::to_vec(&ev).expect("serialize");
             let back: InputEvent = serde_json::from_slice(&bytes).expect("deserialize");
             assert_eq!(format!("{:?}", ev), format!("{:?}", back));
+        }
+    }
+
+    /// v0.3.6 backward-compat anchor: a v0.3.0–v0.3.5 sender's JSON
+    /// (without the `unicode` field) must still deserialize cleanly on a
+    /// v0.3.6 receiver, with `unicode = None`. If this test breaks,
+    /// we've silently made the wire format incompatible with the last
+    /// 5 releases.
+    #[test]
+    fn key_event_backward_compatible_without_unicode_field() {
+        let legacy_json = r#"{"kind":"Key","key":"KeyA","pressed":true}"#;
+        let parsed: InputEvent = serde_json::from_str(legacy_json).expect("legacy parse");
+        match parsed {
+            InputEvent::Key { key, pressed, unicode } => {
+                assert_eq!(key, "KeyA");
+                assert!(pressed);
+                assert!(unicode.is_none(), "unicode must default to None for legacy wire");
+            }
+            _ => panic!("expected Key variant"),
         }
     }
 

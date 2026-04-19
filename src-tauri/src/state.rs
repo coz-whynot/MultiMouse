@@ -91,6 +91,14 @@ pub struct Settings {
     /// `hotkey_release` or the tray menu to switch sides.
     #[serde(default)]
     pub switch_hotkeys: Vec<String>,
+    /// Multiplier applied to the sender's mouse-motion deltas before
+    /// shipping on the wire. 1.0 = same feel as the physical mouse.
+    /// 0.5 = half as sensitive (slower remote cursor). 2.0 = twice as
+    /// sensitive. Clamped at use-time to `[0.1, 5.0]` to prevent
+    /// accidental near-zero or runaway values. Applies on all three
+    /// capture paths (HID tap, Raw Input, Linux absolute fallback).
+    #[serde(default = "default_mouse_sensitivity")]
+    pub mouse_sensitivity: f64,
 }
 
 fn default_edge_dwell_ms() -> u32 { 150 }
@@ -98,6 +106,7 @@ fn default_auto_reconnect() -> bool { true }
 fn default_privacy_blur() -> bool { true }
 fn default_hide_cursor_during_relay() -> bool { true }
 fn default_auto_gaming_mode() -> bool { true }
+fn default_mouse_sensitivity() -> f64 { 1.0 }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -116,6 +125,7 @@ impl Default for Settings {
             hide_cursor_during_relay: true,
             auto_gaming_mode: true,
             switch_hotkeys: Vec::new(),
+            mouse_sensitivity: 1.0,
         }
     }
 }

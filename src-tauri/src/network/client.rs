@@ -401,7 +401,7 @@ pub async fn connect_stream(
     let held: Vec<String> = state.held_modifiers.lock().drain().collect();
     for key in held {
         state.send_net(NetCommand::Input(
-            crate::network::protocol::InputEvent::Key { key, pressed: false },
+            crate::network::protocol::InputEvent::Key { key, pressed: false, unicode: None },
         ));
     }
 

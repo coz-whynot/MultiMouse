@@ -620,12 +620,23 @@ pub async fn handle_controller(
                             let lh = (by1 - by0).max(1.0);
                             let x_rel = x - bx0;
                             let y_rel = y - by0;
-                            if entry_edge.is_none() && state.is_controlled() {
+                            if entry_edge.is_none() {
                                 // Decide which edge the cursor came in from
-                                // by proximity. Leave `entry_edge = None` if
-                                // the MouseMove landed mid-screen; the return
-                                // check below is skipped in that state
-                                // rather than falsely labelling it "bottom."
+                                // by proximity. The first post-FocusReleased
+                                // MouseMove this session IS the entry warp —
+                                // detection isn't gated on `is_controlled`
+                                // because the sender's wire-message order
+                                // puts `Input(MouseMove)` immediately before
+                                // `FocusAcquired`, so `is_controlled` hasn't
+                                // flipped true yet when we process it. Gating
+                                // here previously caused the "can't come
+                                // back" bug: entry edge never set → return
+                                // edge never detected.
+                                //
+                                // Leave `entry_edge = None` if the MouseMove
+                                // landed mid-screen; the return check below
+                                // is skipped in that state rather than
+                                // falsely labelling it "bottom."
                                 entry_edge =
                                     if      x_rel < 10.0      { Some("left") }
                                     else if x_rel > lw - 10.0 { Some("right") }
@@ -636,7 +647,7 @@ pub async fn handle_controller(
                                     return_sent = false;
                                     departed = false;
                                 }
-                            } else if entry_edge.is_some() && !return_sent {
+                            } else if !return_sent {
                                 if !departed {
                                     departed = match entry_edge {
                                         Some("left")   => x_rel > departed_threshold,
@@ -678,7 +689,15 @@ pub async fn handle_controller(
                         entry_edge = None;
                         return_sent = false;
                         departed = false;
-                        cursor_pos = None;
+                        // `cursor_pos` is deliberately NOT reset here. The
+                        // sender ships `Input(MouseMove)` (the entry warp)
+                        // immediately before `FocusAcquired`; wiping here
+                        // would drop the entry position and leave
+                        // subsequent `MouseMoveRel` events unable to
+                        // accumulate — which would mean the return-edge
+                        // detector never fires and the user can't cross
+                        // back. FocusReleased still resets (clean session
+                        // end).
                         let _ = app.emit("focus-acquired", ());
                     }
                     Message::FocusReleased => {
@@ -722,7 +741,7 @@ pub async fn handle_controller(
         tracing::info!("[server] session ending with {} held modifier(s); releasing", local_held.len());
         for key in local_held.drain() {
             inject::process_event(
-                crate::network::protocol::InputEvent::Key { key, pressed: false },
+                crate::network::protocol::InputEvent::Key { key, pressed: false, unicode: None },
             );
         }
     }
@@ -869,7 +888,7 @@ pub(super) fn update_held_modifiers(
     event: &crate::network::protocol::InputEvent,
 ) {
     use crate::network::protocol::InputEvent;
-    if let InputEvent::Key { key, pressed } = event {
+    if let InputEvent::Key { key, pressed, .. } = event {
         if crate::input::is_modifier_key_name(key) {
             if *pressed {
                 held.insert(key.clone());
@@ -916,7 +935,7 @@ mod tests {
     #[test]
     fn non_motion_events_do_not_touch_cursor() {
         let mut cursor = Some((50.0, 50.0));
-        update_cursor(&mut cursor, &InputEvent::Key { key: "KeyA".into(), pressed: true });
+        update_cursor(&mut cursor, &InputEvent::Key { key: "KeyA".into(), pressed: true, unicode: None });
         update_cursor(&mut cursor, &InputEvent::MouseButton { button: 0, pressed: true });
         update_cursor(&mut cursor, &InputEvent::MouseScroll { dx: 0, dy: 1 });
         assert_eq!(cursor, Some((50.0, 50.0)));
@@ -927,29 +946,29 @@ mod tests {
     #[test]
     fn modifier_press_inserts_release_removes() {
         let mut held = HashSet::new();
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true, unicode: None });
         assert!(held.contains("ShiftLeft"));
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: false });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: false, unicode: None });
         assert!(!held.contains("ShiftLeft"));
     }
 
     #[test]
     fn non_modifier_keys_are_not_tracked() {
         let mut held = HashSet::new();
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "KeyA".into(), pressed: true });
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "F1".into(), pressed: true });
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "Space".into(), pressed: true });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "KeyA".into(), pressed: true, unicode: None });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "F1".into(), pressed: true, unicode: None });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "Space".into(), pressed: true, unicode: None });
         assert!(held.is_empty());
     }
 
     #[test]
     fn multiple_modifiers_coexist() {
         let mut held = HashSet::new();
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true });
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "ControlLeft".into(), pressed: true });
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "Alt".into(), pressed: true });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true, unicode: None });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ControlLeft".into(), pressed: true, unicode: None });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "Alt".into(), pressed: true, unicode: None });
         assert_eq!(held.len(), 3);
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "ControlLeft".into(), pressed: false });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ControlLeft".into(), pressed: false, unicode: None });
         assert_eq!(held.len(), 2);
         assert!(held.contains("ShiftLeft"));
         assert!(held.contains("Alt"));
@@ -965,7 +984,7 @@ mod tests {
         ];
         let mut held = HashSet::new();
         for m in mods {
-            update_held_modifiers(&mut held, &InputEvent::Key { key: m.into(), pressed: true });
+            update_held_modifiers(&mut held, &InputEvent::Key { key: m.into(), pressed: true, unicode: None });
         }
         assert_eq!(held.len(), mods.len());
     }
@@ -985,7 +1004,7 @@ mod tests {
         // Session start: entry warp places cursor at peer's left edge.
         update_cursor(&mut cursor, &InputEvent::MouseMove { x: 1.0, y: 300.0 });
         // User presses Shift on the controller and starts typing.
-        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true, unicode: None });
         update_cursor(&mut cursor, &InputEvent::MouseMoveRel { dx: 50.0, dy: 0.0 });
         update_cursor(&mut cursor, &InputEvent::MouseMoveRel { dx: 50.0, dy: 10.0 });
 

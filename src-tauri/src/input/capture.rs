@@ -346,14 +346,15 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
         let skip_motion = false;
 
         if !skip_motion {
-            if let Some(ev) = convert_and_remap(&event.event_type, state) {
+            // Extract sender-side layout-translated character name from
+            // rdev's UnicodeInfo so the receiver has a fallback when its
+            // keycode table doesn't recognise `format!("{:?}", key)`.
+            let unicode_name = event.unicode.as_ref().and_then(|u| u.name.clone());
+            if let Some(ev) = convert_and_remap(&event.event_type, state, unicode_name) {
                 // Diagnostic trace — ship-side of the sender's keyboard
-                // path. Parallels the `[mouse]` traces. `[key]` logs
-                // fire unconditionally (no throttle) since key events
-                // are rare enough to log individually. Mapped success
-                // is logged on the inject side.
-                if let InputEvent::Key { key, pressed } = &ev {
-                    tracing::debug!("[key] ship {} pressed={}", key, pressed);
+                // path. Parallels the `[mouse]` traces.
+                if let InputEvent::Key { key, pressed, unicode } = &ev {
+                    tracing::debug!("[key] ship {} pressed={} unicode={:?}", key, pressed, unicode);
                 }
                 // Phase 6 held-modifier bookkeeping: remember every
                 // modifier press we ship, so we can send a release burst
@@ -361,7 +362,7 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
                 // them. `is_modifier_key_name` limits the set to
                 // Shift/Ctrl/Alt/Meta (the ones that cause visible stuck
                 // behaviour on the peer — ALL CAPS, Cmd shortcuts, etc.).
-                if let InputEvent::Key { key, pressed } = &ev {
+                if let InputEvent::Key { key, pressed, .. } = &ev {
                     if crate::input::is_modifier_key_name(key) {
                         let mut held = state.held_modifiers.lock();
                         if *pressed {
@@ -568,7 +569,8 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
             }
         }
 
-        if let Some(ev) = convert_and_remap(&event.event_type, state) {
+        let unicode_name = event.unicode.as_ref().and_then(|u| u.name.clone());
+        if let Some(ev) = convert_and_remap(&event.event_type, state, unicode_name) {
             state.send_net(NetCommand::Input(ev));
         }
     } else {
@@ -660,7 +662,11 @@ fn compute_entry_point(x: f64, y: f64, edge: &str, monitors: &[crate::state::Mon
 /// call.
 ///
 /// All coords are in **sender physical virtual-desktop pixels** (v5+).
-fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEvent> {
+fn convert_and_remap(
+    event_type: &EventType,
+    state: &AppState,
+    unicode: Option<String>,
+) -> Option<InputEvent> {
     match event_type {
         EventType::MouseMove { x, y } => {
             // Local-anchor cache. `relay_entry` now only holds the REMOTE
@@ -710,10 +716,14 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
                 let monitors = state.monitors.read().clone();
                 let (bx0, by0, bx1, by1) = layout::virtual_bounds(&monitors);
                 let (lw, lh) = ((bx1 - bx0).max(1.0), (by1 - by0).max(1.0));
+                // Sensitivity multiplier (user setting, clamped). Folded
+                // into the scale so deltas from rdev-observed motion are
+                // sped up / slowed down before reaching the remote.
+                let sensitivity = state.settings.read().mouse_sensitivity.clamp(0.1, 5.0);
                 let (sx, sy) = if let Some((rw, rh)) = remote {
-                    (rw / lw, rh / lh)
+                    ((rw / lw) * sensitivity, (rh / lh) * sensitivity)
                 } else {
-                    (1.0, 1.0)
+                    (sensitivity, sensitivity)
                 };
                 let nx = ex + dx * sx;
                 let ny = ey + dy * sy;
@@ -731,11 +741,16 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
 
             Some(InputEvent::MouseMove { x: rx, y: ry })
         }
-        other => convert_event(other),
+        other => convert_event(other, unicode),
     }
 }
 
-fn convert_event(event_type: &EventType) -> Option<InputEvent> {
+/// Translate rdev's raw event shape into our wire protocol. `unicode` is
+/// the sender-side layout-translated character (from rdev's `Event.name`)
+/// — populated for KeyPress/KeyRelease so the receiver has a fallback path
+/// for keys its name-table doesn't recognise, and for any keys where the
+/// sender's and receiver's keyboard layouts differ.
+fn convert_event(event_type: &EventType, unicode: Option<String>) -> Option<InputEvent> {
     match event_type {
         EventType::MouseMove { x, y } => Some(InputEvent::MouseMove { x: *x, y: *y }),
         EventType::ButtonPress(btn) => Some(InputEvent::MouseButton {
@@ -749,10 +764,12 @@ fn convert_event(event_type: &EventType) -> Option<InputEvent> {
         EventType::KeyPress(key) => Some(InputEvent::Key {
             key: format!("{:?}", key),
             pressed: true,
+            unicode,
         }),
         EventType::KeyRelease(key) => Some(InputEvent::Key {
             key: format!("{:?}", key),
             pressed: false,
+            unicode,
         }),
         EventType::Wheel { delta_x, delta_y } => Some(InputEvent::MouseScroll {
             dx: *delta_x,

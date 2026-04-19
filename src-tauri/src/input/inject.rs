@@ -313,20 +313,35 @@ fn inject(enigo: &mut Enigo, event: InputEvent, state: &AppState) {
                 let _ = enigo.scroll(dx as i32, enigo::Axis::Horizontal);
             }
         }
-        InputEvent::Key { key, pressed } => {
+        InputEvent::Key { key, pressed, unicode } => {
             let dir = if pressed { Direction::Press } else { Direction::Release };
             let mapped = rdev_key_to_enigo(&key);
-            // Diagnostic trace — receiver's inject side. `mapped=false`
-            // means rdev's Debug-format string wasn't in the hand-table
-            // `rdev_key_to_enigo`, so the key was silently dropped.
-            // rdev's Key Debug format is not stable across platforms
-            // (e.g. `KpReturn` falls through to `Return` on Windows,
-            // numpad names change with NumLock state), so mismatches
-            // between sender and receiver mapping tables are a known
-            // failure mode.
-            tracing::debug!("[key] inject {} pressed={} mapped={}", key, pressed, mapped.is_some());
+            tracing::debug!(
+                "[key] inject {} pressed={} mapped={} unicode={:?}",
+                key, pressed, mapped.is_some(), unicode
+            );
+            // Primary path: keycode-based injection. Respects press/release
+            // semantics (necessary for held-modifier scenarios like
+            // Shift+letter, and for gaming keys like hold-W-to-walk).
             if let Some(k) = mapped {
                 let _ = enigo.key(k, dir);
+                return;
+            }
+            // Fallback path: the sender's rdev Debug-format name wasn't
+            // in the local keycode table (rdev's Debug format is not
+            // stable across platforms — `KpReturn` collapses to `Return`
+            // on Windows, numpad names vary with NumLock state, etc.).
+            // If the sender also shipped a unicode-translated character
+            // via its local keyboard layout, type it as text. enigo.text
+            // respects any currently-held modifiers (Shift, etc.) via the
+            // CGEventSource's CombinedSessionState, so Shift+A still
+            // produces "A" on the receiver. We only invoke on press —
+            // enigo.text is press+release atomic internally, so mirroring
+            // on the Release would type the character twice.
+            if pressed {
+                if let Some(txt) = unicode.filter(|s| !s.is_empty()) {
+                    let _ = enigo.text(&txt);
+                }
             }
         }
     }
