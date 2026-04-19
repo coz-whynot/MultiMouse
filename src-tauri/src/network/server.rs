@@ -254,73 +254,58 @@ pub async fn handle_controller(
         *state.remote_screen.lock() = Some((width, height));
     }
 
-    let mut active_win_interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
-    let mut last_app: Option<String> = None;
-
+    // Single-threaded read loop — NO select! with other branches, because
+    // `read_enc_message` is not cancel-safe: if another branch of a select!
+    // fires mid-read, the partially-read bytes are lost and the next read
+    // returns a corrupted frame → decrypt fails → the entire session drops.
+    // (Active-window polling used to run alongside here; it's been removed
+    // until a proper writer-task architecture exists for the server side.)
     loop {
-        tokio::select! {
-            _ = active_win_interval.tick() => {
-                if let Some(app_name) = crate::input::active_window::current_app() {
-                    if Some(&app_name) != last_app.as_ref() {
-                        let msg = Message::ActiveWindow { app_name: app_name.clone() };
-                        // Approximate bytes on the wire: JSON length + 28 (tag+nonce) + 4 (length prefix)
-                        if let Ok(data) = serde_json::to_vec(&msg) {
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            read_enc_message(&mut stream, &mut recv_enc),
+        )
+        .await;
+
+        match result {
+            Ok(Some(msg)) => {
+                if let Ok(data) = serde_json::to_vec(&msg) {
+                    state.add_bytes_received(data.len() as u64 + 32);
+                }
+                match msg {
+                    Message::Input(event) => {
+                        state.mark_activity();
+                        inject::process_event(event);
+                    }
+                    Message::FocusAcquired => {
+                        state.set_controlled(true);
+                        let _ = app.emit("focus-acquired", ());
+                    }
+                    Message::FocusReleased => {
+                        state.set_controlled(false);
+                        let _ = app.emit("focus-released", ());
+                    }
+                    Message::ClipboardText { text } => {
+                        set_clipboard(text);
+                    }
+                    Message::ClipboardImage { width, height, bytes } => {
+                        set_clipboard_image(width, height, bytes);
+                    }
+                    Message::Ping { ts } => {
+                        let pong = Message::Pong { ts };
+                        if let Ok(data) = serde_json::to_vec(&pong) {
                             state.add_bytes_sent(data.len() as u64 + 32);
                         }
-                        if !send_enc_message(&mut stream, &msg, &mut send_enc).await {
-                            break;
-                        }
-                        last_app = Some(app_name);
+                        send_enc_message(&mut stream, &pong, &mut send_enc).await;
                     }
+                    Message::Bye => break,
+                    _ => {}
                 }
             }
-            result = tokio::time::timeout(
-                tokio::time::Duration::from_secs(15),
-                read_enc_message(&mut stream, &mut recv_enc),
-            ) => {
-                match result {
-                    Ok(Some(msg)) => {
-                        if let Ok(data) = serde_json::to_vec(&msg) {
-                            state.add_bytes_received(data.len() as u64 + 32);
-                        }
-                        match msg {
-                            Message::Input(event) => {
-                                // Client already maps coordinates into this machine's screen space
-                                // via delta tracking on relay activation — no scaling needed here.
-                                state.mark_activity();
-                                inject::process_event(event);
-                            }
-                            Message::FocusAcquired => {
-                                state.set_controlled(true);
-                                let _ = app.emit("focus-acquired", ());
-                            }
-                            Message::FocusReleased => {
-                                state.set_controlled(false);
-                                let _ = app.emit("focus-released", ());
-                            }
-                            Message::ClipboardText { text } => {
-                                set_clipboard(text);
-                            }
-                            Message::ClipboardImage { width, height, bytes } => {
-                                set_clipboard_image(width, height, bytes);
-                            }
-                            Message::Ping { ts } => {
-                                let pong = Message::Pong { ts };
-                                if let Ok(data) = serde_json::to_vec(&pong) {
-                                    state.add_bytes_sent(data.len() as u64 + 32);
-                                }
-                                send_enc_message(&mut stream, &pong, &mut send_enc).await;
-                            }
-                            Message::Bye => break,
-                            _ => {}
-                        }
-                    }
-                    Ok(None) => break, // parse error or connection closed
-                    Err(_) => {
-                        tracing::warn!("Connection timed out (no message in 15s) from {}", peer_addr);
-                        break;
-                    }
-                }
+            Ok(None) => break, // parse error or connection closed
+            Err(_) => {
+                tracing::warn!("Connection timed out (no message in 30s) from {}", peer_addr);
+                break;
             }
         }
     }

@@ -80,7 +80,7 @@ impl Default for Settings {
             onboarding_done: false,
             auto_reconnect: true,
             idle_lock_minutes: 0,
-            privacy_blur_on_relay: true,
+            privacy_blur_on_relay: false,
             gaming_mode: false,
         }
     }

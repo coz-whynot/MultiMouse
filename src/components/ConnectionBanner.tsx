@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { PeerInfo } from '../types';
+import { useStore } from '../store/useStore';
 
 /* Rough emoji picker for an app-name heuristic. Extend as needed. */
 const appEmoji = (name: string): string => {
@@ -77,8 +78,22 @@ const LatencyPill = ({ ms }: { ms?: number | null }) => {
 export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
   // Theme-dependent colors come through CSS custom properties set on the
   // root [data-theme] node, so we no longer need to branch per-theme here.
+  const settings = useStore((s) => s.settings);
+  const setSettings = useStore((s) => s.setSettings);
   const handleDisconnect = () => invoke('disconnect');
   const handleRelease = () => invoke('release_cursor');
+
+  const blurOn = settings?.privacy_blur_on_relay === true;
+  const toggleBlur = async () => {
+    if (!settings) return;
+    const next = { ...settings, privacy_blur_on_relay: !blurOn };
+    try {
+      await invoke('update_settings', { settings: next });
+      setSettings(next);
+    } catch (e) {
+      console.error('toggle blur failed', e);
+    }
+  };
 
   const [activeWindow, setActiveWindow] = useState<string | null>(null);
 
@@ -187,7 +202,29 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
 
             {/* Action buttons — Release is ALWAYS enabled so the user can use the
                 tray menu / keyboard hotkey even when the cursor is unreachable */}
-            <div className="flex gap-1.5 flex-shrink-0">
+            <div className="flex gap-1.5 flex-shrink-0 items-center">
+              {/* Privacy blur quick-toggle */}
+              <button
+                onClick={toggleBlur}
+                title={blurOn ? 'Privacy blur ON — click to disable' : 'Privacy blur OFF — click to enable'}
+                className="w-7 h-7 rounded-lg flex items-center justify-center transition-all"
+                style={{
+                  background: blurOn ? 'rgba(99,102,241,0.2)' : 'var(--bg-subtle)',
+                  color: blurOn ? 'var(--accent-primary)' : 'var(--text-muted)',
+                  border: `1px solid ${blurOn ? 'var(--border-strong)' : 'var(--border-subtle)'}`,
+                }}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  {blurOn ? (
+                    <path strokeLinecap="round" strokeLinejoin="round"
+                      d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round"
+                      d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                  )}
+                </svg>
+              </button>
+
               <button
                 onClick={handleRelease}
                 className="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-all"

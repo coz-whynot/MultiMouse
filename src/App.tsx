@@ -204,7 +204,9 @@ export default function App() {
   const rootBorder = isLight ? '1px solid rgba(79,70,229,0.22)' : '1px solid rgba(99,102,241,0.16)';
 
   // FEATURE 2: Privacy blur while we're actively controlling a peer.
-  const privacyBlurOn = settings?.privacy_blur_on_relay !== false;
+  // Default OFF — was blocking multi-monitor usage and hiding the Release
+  // button. User can opt-in via Settings → Security.
+  const privacyBlurOn = settings?.privacy_blur_on_relay === true;
   const relaying = status?.relaying === true;
   const isControlled = status?.is_controlled === true;
   const blurContent = privacyBlurOn && relaying;
