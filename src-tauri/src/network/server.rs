@@ -403,6 +403,13 @@ pub async fn handle_controller(
     let mut active_window_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
     active_window_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_active_window: Option<String> = None;
+    // Entry edge of the current controlled session (detected from the first
+    // MouseMove after FocusAcquired). When the injected cursor reaches this
+    // same edge again, we treat it as the user pushing back across and send
+    // ReturnToSender so the controller reclaims control without pressing Esc.
+    let mut entry_edge: Option<&'static str> = None;
+    let mut return_sent = false;
+    let return_edge_threshold: f64 = 3.0;
     loop {
         let msg = tokio::select! {
             biased;
@@ -450,14 +457,66 @@ pub async fn handle_controller(
                 state.mark_activity();
                 match msg {
                     Message::Input(event) => {
+                        // Detect the entry edge on the first MouseMove after
+                        // FocusAcquired, and the return-edge crossing on every
+                        // subsequent MouseMove. Coordinates are already in our
+                        // local screen space (client remaps via delta tracking).
+                        // Use the monitors-based virtual bounds (not
+                        // rdev::display_size() which is primary-only) so
+                        // multi-monitor receivers get the correct far edges.
+                        if let crate::network::protocol::InputEvent::MouseMove { x, y } = event {
+                            let (bx0, by0, bx1, by1) = {
+                                let monitors = state.monitors.read().clone();
+                                crate::screen::layout::virtual_bounds(&monitors)
+                            };
+                            let lw = (bx1 - bx0).max(1.0);
+                            let lh = (by1 - by0).max(1.0);
+                            // Translate cursor into 0..lw/0..lh coordinate space.
+                            let x_rel = x - bx0;
+                            let y_rel = y - by0;
+                            if entry_edge.is_none() && state.is_controlled() {
+                                // Decide which edge the cursor came in from by
+                                // proximity (entry_point is placed near the edge
+                                // by the controller's compute_entry_point).
+                                entry_edge = Some(
+                                    if      x_rel < 10.0      { "left" }
+                                    else if x_rel > lw - 10.0 { "right" }
+                                    else if y_rel < 10.0      { "top" }
+                                    else                      { "bottom" }
+                                );
+                                return_sent = false;
+                            } else if !return_sent {
+                                // Has the injected cursor reached the entry
+                                // edge again? If so, controller takes back.
+                                let at_return_edge = match entry_edge {
+                                    Some("left")   => x_rel <= return_edge_threshold,
+                                    Some("right")  => x_rel >= lw - return_edge_threshold - 1.0,
+                                    Some("top")    => y_rel <= return_edge_threshold,
+                                    Some("bottom") => y_rel >= lh - return_edge_threshold - 1.0,
+                                    _ => false,
+                                };
+                                if at_return_edge {
+                                    return_sent = true;
+                                    send_enc_message(&mut stream, &Message::ReturnToSender, &mut send_enc).await;
+                                    state.set_controlled(false);
+                                    let _ = app.emit("focus-released", ());
+                                    tracing::info!("Cursor reached return edge {:?} — sent ReturnToSender", entry_edge);
+                                    entry_edge = None;
+                                }
+                            }
+                        }
                         inject::process_event(event);
                     }
                     Message::FocusAcquired => {
                         state.set_controlled(true);
+                        entry_edge = None;
+                        return_sent = false;
                         let _ = app.emit("focus-acquired", ());
                     }
                     Message::FocusReleased => {
                         state.set_controlled(false);
+                        entry_edge = None;
+                        return_sent = false;
                         let _ = app.emit("focus-released", ());
                     }
                     Message::ClipboardText { text } => {

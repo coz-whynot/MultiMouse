@@ -251,6 +251,28 @@ pub async fn connect_stream(
             Message::ActiveWindow { app_name } => {
                 let _ = app.emit("remote-active-window", app_name);
             }
+            Message::ReturnToSender => {
+                // Receiver's cursor hit the far edge — user wants us to take
+                // back control. Do the same cleanup as a local Esc release.
+                tracing::info!("ReturnToSender received — reclaiming control");
+                state.set_relaying(false);
+                *state.relay_entry.lock() = None;
+                // Warp local cursor back to the OPPOSITE of our transition_edge
+                // so it reappears where it originally exited, not at center.
+                let monitors = state.monitors.read().clone();
+                let (min_x, min_y, max_x, max_y) = crate::screen::layout::virtual_bounds(&monitors);
+                let edge = state.settings.read().transition_edge.clone();
+                let (wx, wy) = match edge.as_str() {
+                    "right"  => ((max_x - 20.0), (min_y + max_y) / 2.0),
+                    "left"   => ((min_x + 20.0), (min_y + max_y) / 2.0),
+                    "top"    => ((min_x + max_x) / 2.0, (min_y + 20.0)),
+                    "bottom" => ((min_x + max_x) / 2.0, (max_y - 20.0)),
+                    _        => ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0),
+                };
+                crate::input::inject::warp_abs(wx as i32, wy as i32);
+                state.reset_edge_state();
+                let _ = app.emit("focus-released", ());
+            }
             _ => {}
         }
     }

@@ -194,7 +194,7 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
                 style={{ color: 'var(--text-muted)' }}
               >
                 {relaying
-                  ? 'Forwarding input · Press ESC ESC to release'
+                  ? 'Forwarding input · Press Esc or push cursor back to release'
                   : 'Push cursor to configured edge to take control'}
               </p>
             </div>

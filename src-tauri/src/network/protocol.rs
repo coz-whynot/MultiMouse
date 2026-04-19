@@ -6,7 +6,7 @@ use crate::crypto::encryption::Channel;
 pub const MULTIMOUSE_PORT: u16 = 57172;
 pub const TRANSFER_PORT: u16 = 57174;
 pub const MULTIMOUSE_SERVICE: &str = "_multimouse._tcp.local.";
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Hard cap on clipboard text bytes so a peer can't force us to buffer
 /// unbounded strings. 64 KiB is well beyond typical copy-paste text.
@@ -63,6 +63,12 @@ pub enum Message {
     Error {
         reason: String,
     },
+    /// Server → client back-channel: the cursor has reached the far edge of
+    /// the server's screen (opposite to where it entered), so the controller
+    /// should take back control. Client warps its cursor to the appropriate
+    /// edge and drops relay — same effect as pressing Esc, but driven by the
+    /// natural "push through the other edge" gesture instead of a hotkey.
+    ReturnToSender,
     Bye,
 }
 
