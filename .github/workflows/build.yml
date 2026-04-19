@@ -213,13 +213,16 @@ jobs:
             fi
           done < <(find "$BUNDLE" -maxdepth 4 -name '*.app.tar.gz*' -print)
 
-          # Windows NSIS + Linux AppImage updater archives + sigs.
+          # Tauri 2 signs installers DIRECTLY (not via separate .nsis.zip /
+          # .AppImage.tar.gz archives like v1 did). Upload every .sig so the
+          # aggregation job sees them. Installer binaries themselves are
+          # already uploaded in the first loop above.
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             upload "$f" "$(basename "$f")"
           done < <(find "$BUNDLE" -maxdepth 4 \
-            \( -name '*.nsis.zip' -o -name '*.nsis.zip.sig' \
-               -o -name '*.AppImage.tar.gz' -o -name '*.AppImage.tar.gz.sig' \) -print)
+            \( -name '*.exe.sig' -o -name '*.msi.sig' \
+               -o -name '*.AppImage.sig' -o -name '*.deb.sig' -o -name '*.rpm.sig' \) -print)
 
       # Keep workflow_dispatch artifact uploads so manual runs still produce
       # downloadable files even when there's no tag release to upload to.
@@ -299,8 +302,9 @@ jobs:
 
           MAC_ARM=$(read_sig "*aarch64.app.tar.gz.sig")
           MAC_X64=$(read_sig "*x64.app.tar.gz.sig")
-          WIN=$(read_sig "*x64-setup.nsis.zip.sig")
-          LINUX=$(read_sig "*amd64.AppImage.tar.gz.sig")
+          # Tauri 2 signs the .exe / .AppImage directly (no separate zip).
+          WIN=$(read_sig "*x64-setup.exe.sig")
+          LINUX=$(read_sig "*amd64.AppImage.sig")
 
           json_platforms="{"
           sep=""
@@ -315,8 +319,8 @@ jobs:
           BASE="https://github.com/$REPO/releases/download/$TAG"
           add "darwin-aarch64" "$MAC_ARM"  "$BASE/MultiMouse_aarch64.app.tar.gz"
           add "darwin-x86_64"  "$MAC_X64"  "$BASE/MultiMouse_x64.app.tar.gz"
-          add "windows-x86_64" "$WIN"      "$BASE/MultiMouse_${VER}_x64-setup.nsis.zip"
-          add "linux-x86_64"   "$LINUX"    "$BASE/MultiMouse_${VER}_amd64.AppImage.tar.gz"
+          add "windows-x86_64" "$WIN"      "$BASE/MultiMouse_${VER}_x64-setup.exe"
+          add "linux-x86_64"   "$LINUX"    "$BASE/MultiMouse_${VER}_amd64.AppImage"
           json_platforms+="}"
 
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
