@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { useStore } from '../store/useStore';
 import { Settings, KnownDevice, BandwidthStats, AuditEntry } from '../types';
 
@@ -248,6 +249,9 @@ export const SettingsPage = () => {
   const [auditLog, setAuditLog] = useState<AuditEntry[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [confirmClearAudit, setConfirmClearAudit] = useState(false);
+  // Pulled from Tauri at mount so the About section always reflects the
+  // *actual* bundled version, not a stringly-typed constant that drifts.
+  const [appVersion, setAppVersion] = useState<string>('');
 
   const connectedPeer = status?.connected_peer ?? null;
 
@@ -255,6 +259,10 @@ export const SettingsPage = () => {
     if (settings) setRelayInput(settings.relay_url ?? '');
     invoke<KnownDevice[]>('get_known_devices').then(setKnownDevices).catch(() => {});
   }, [settings?.relay_url]);
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion(''));
+  }, []);
 
   // Poll bandwidth while a peer is connected.
   useEffect(() => {
@@ -890,7 +898,7 @@ export const SettingsPage = () => {
             <div>
               <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>MultiMouse</p>
               <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
-                v0.1.0 · {status?.device_name ?? '—'}
+                {appVersion ? `v${appVersion}` : 'v—'} · {status?.device_name ?? '—'}
               </p>
             </div>
             <button
