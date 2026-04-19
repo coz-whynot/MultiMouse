@@ -34,6 +34,10 @@ pub async fn create_session(
     let mut stream = TcpStream::connect(&relay_url)
         .await
         .map_err(|e| format!("Relay connect failed: {}", e))?;
+    // Disable Nagle so mouse-move packets ship immediately through the relay.
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::warn!("set_nodelay failed on relay create: {}", e);
+    }
 
     stream
         .write_all(b"CREATE\n")
@@ -94,6 +98,9 @@ pub async fn join_session(
             return;
         }
     };
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::warn!("set_nodelay failed on relay join: {}", e);
+    }
 
     if stream
         .write_all(format!("JOIN {}\n", code.trim().to_uppercase()).as_bytes())

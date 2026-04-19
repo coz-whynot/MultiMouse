@@ -346,28 +346,25 @@ pub async fn get_monitors(
                 .zip(m.name())
                 .map(|(a, b)| a == b)
                 .unwrap_or(false);
-            // Tauri returns position/size in PHYSICAL pixels, but rdev reports
-            // mouse coordinates in LOGICAL pixels on macOS/scaled displays.
-            // We normalize everything to logical pixels here so edge detection
-            // and cursor math downstream match rdev's coordinate system.
+            // v5: Store geometry in PHYSICAL virtual-desktop pixels. Tauri's
+            // `position()` and `size()` already return physical pixels — the
+            // previous `/sf` division forced a fake "logical" space that broke
+            // on mixed-DPI multi-monitor setups (portable monitor bug).
             let sf = m.scale_factor().max(1e-6);
             let pos = m.position();
             let sz = m.size();
             MonitorInfo {
                 name: m.name().map(|s| s.as_str()).unwrap_or("Display").to_string(),
-                x: ((pos.x as f64) / sf).round() as i32,
-                y: ((pos.y as f64) / sf).round() as i32,
-                width: ((sz.width as f64) / sf).round() as u32,
-                height: ((sz.height as f64) / sf).round() as u32,
+                x: pos.x as i32,
+                y: pos.y as i32,
+                width: sz.width,
+                height: sz.height,
                 scale_factor: sf,
                 is_primary,
             }
         })
         .collect();
 
-    if let Some(p) = monitors.iter().find(|m| m.is_primary).or_else(|| monitors.first()) {
-        crate::input::inject::set_primary_scale(p.scale_factor);
-    }
     *state.monitors.write() = monitors.clone();
     Ok(monitors)
 }

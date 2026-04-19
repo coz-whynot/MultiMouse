@@ -82,7 +82,14 @@ pub async fn connect(
         tokio::time::Duration::from_secs(10),
         TcpStream::connect(&addr),
     ).await {
-        Ok(Ok(s)) => s,
+        Ok(Ok(s)) => {
+            // Disable Nagle so mouse-move packets ship immediately instead of
+            // waiting up to ~40ms for coalescing. Critical for gaming feel.
+            if let Err(e) = s.set_nodelay(true) {
+                tracing::warn!("set_nodelay failed on {}: {}", addr, e);
+            }
+            s
+        }
         Ok(Err(e)) => {
             tracing::error!("Connect to {} failed: {}", addr, e);
             // The address we have is no good right now. Clear it so the next
@@ -475,7 +482,12 @@ fn reconnect_with_backoff(
                 tokio::time::Duration::from_secs(5),
                 TcpStream::connect(&addr),
             ).await {
-                Ok(Ok(s)) => s,
+                Ok(Ok(s)) => {
+                    if let Err(e) = s.set_nodelay(true) {
+                        tracing::warn!("set_nodelay failed on {}: {}", addr, e);
+                    }
+                    s
+                }
                 Ok(Err(e)) => {
                     tracing::warn!("Auto-reconnect connect to {} failed: {}", addr, e);
                     if matches!(e.kind(),
@@ -505,4 +517,55 @@ fn reconnect_with_backoff(
         tracing::warn!("Auto-reconnect gave up for {}", peer.name);
         let _ = app.emit("reconnect-gave-up", &peer.id);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_usable_addr;
+
+    #[test]
+    fn rejects_empty() {
+        assert!(!is_usable_addr(""));
+    }
+
+    #[test]
+    fn rejects_ipv4_loopback() {
+        assert!(!is_usable_addr("127.0.0.1"));
+    }
+
+    #[test]
+    fn rejects_ipv4_link_local() {
+        assert!(!is_usable_addr("169.254.1.2"));
+    }
+
+    #[test]
+    fn accepts_ipv4_lan() {
+        assert!(is_usable_addr("192.168.1.19"));
+        assert!(is_usable_addr("10.0.0.5"));
+        assert!(is_usable_addr("172.16.0.1"));
+    }
+
+    #[test]
+    fn rejects_ipv6_loopback() {
+        assert!(!is_usable_addr("::1"));
+    }
+
+    #[test]
+    fn rejects_ipv6_link_local() {
+        // The reconnect bug: this was what mDNS was handing us.
+        assert!(!is_usable_addr("fe80::62f1:5c24:9f4b:14d5"));
+        assert!(!is_usable_addr("fe80::1"));
+    }
+
+    #[test]
+    fn accepts_ipv6_global() {
+        assert!(is_usable_addr("2001:db8::1"));
+    }
+
+    #[test]
+    fn accepts_hostname() {
+        // We don't do DNS resolution locally; hostnames get a pass and the
+        // OS resolver decides.
+        assert!(is_usable_addr("desktop-v8obt7j.local"));
+    }
 }

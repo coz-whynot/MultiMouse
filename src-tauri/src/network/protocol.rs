@@ -6,7 +6,11 @@ use crate::crypto::encryption::Channel;
 pub const MULTIMOUSE_PORT: u16 = 57172;
 pub const TRANSFER_PORT: u16 = 57174;
 pub const MULTIMOUSE_SERVICE: &str = "_multimouse._tcp.local.";
-pub const PROTOCOL_VERSION: u32 = 4;
+/// Wire protocol version. Bumped 4→5 when `InputEvent::MouseMove` and
+/// `Message::ScreenSize` switched from logical-pixel to physical-virtual-desktop
+/// coordinates. v4 peers will be cleanly rejected by the version check in
+/// `server.rs`.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Hard cap on clipboard text bytes so a peer can't force us to buffer
 /// unbounded strings. 64 KiB is well beyond typical copy-paste text.
@@ -34,6 +38,7 @@ pub enum Message {
     },
     FocusAcquired,
     FocusReleased,
+    /// Sender's virtual-desktop dimensions in **physical pixels** (v5).
     ScreenSize {
         width: f64,
         height: f64,
@@ -122,6 +127,10 @@ pub enum TransferMessage {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "kind")]
 pub enum InputEvent {
+    /// Absolute cursor position in the sender's **physical virtual-desktop**
+    /// coordinate space (v5). Receivers scale to their own physical space
+    /// using `state.remote_screen` and apply a per-platform OS-boundary
+    /// conversion at inject time.
     MouseMove { x: f64, y: f64 },
     MouseButton { button: u8, pressed: bool },
     MouseScroll { dx: i64, dy: i64 },

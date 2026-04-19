@@ -1,9 +1,11 @@
+use std::sync::Arc;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use once_cell::sync::OnceCell;
 use tauri::{AppHandle, Emitter};
 use crate::network::protocol::InputEvent;
+use crate::state::AppState;
 
 /// Local-only inject commands (not serialized on the wire). Protocol-level events
 /// come in as InputEvent::Remote; trackpad/UI-level commands use the other variants.
@@ -39,31 +41,40 @@ pub fn recently_injected(window_ms: u64) -> bool {
     now.saturating_sub(last) <= window_ms
 }
 
-/// Primary display's scale factor, stored as f64 bits in a u64 atomic so the
-/// inject thread can read it without a mutex. Updated from
-/// `refresh_monitors` on the main thread.
-static PRIMARY_SCALE_BITS: AtomicU64 = AtomicU64::new(f64::to_bits(1.0));
-
-/// Called by the monitor refresh path whenever primary display changes, so
-/// the inject thread knows how to convert logical wire coords to the
-/// physical pixels SetCursorPos expects on Windows.
-pub fn set_primary_scale(sf: f64) {
-    PRIMARY_SCALE_BITS.store(sf.to_bits(), Ordering::Relaxed);
-}
-
-/// Convert logical wire coords to the coordinate unit `enigo.move_mouse` wants
-/// on this platform. macOS's CGWarp takes logical points as-is; Windows's
-/// SetCursorPos takes physical pixels so we scale up.
+/// Convert wire coords (sender-physical virtual-desktop px, v5) to the unit
+/// `enigo.move_mouse` wants on this platform.
+///
+/// - **Windows:** `SetCursorPos` in a PER_MONITOR_V2 process takes physical
+///   virtual-screen pixels natively — pass-through.
+/// - **macOS:** enigo posts a CGEvent whose destination CGPoint is in logical
+///   points (the global display coordinate space). Divide by the receiver's
+///   primary `backingScaleFactor`. Multi-display mac with mixed sf is a
+///   `TODO(multimon-mac-inject)`.
+/// - **Linux:** pass-through (unit semantics fuzzy on X11/Wayland).
 #[inline]
-fn logical_to_inject_xy(x: f64, y: f64) -> (f64, f64) {
+fn physical_to_inject_xy(x: f64, y: f64, state: &AppState) -> (f64, f64) {
     #[cfg(target_os = "windows")]
     {
-        let sf = f64::from_bits(PRIMARY_SCALE_BITS.load(Ordering::Relaxed));
-        let sf = if sf.is_finite() && sf > 0.0 { sf } else { 1.0 };
-        (x * sf, y * sf)
+        let _ = state;
+        (x, y)
     }
-    #[cfg(not(target_os = "windows"))]
-    { (x, y) }
+    #[cfg(target_os = "macos")]
+    {
+        let sf = state
+            .monitors
+            .read()
+            .iter()
+            .find(|m| m.is_primary)
+            .map(|m| m.scale_factor)
+            .unwrap_or(1.0)
+            .max(1e-6);
+        (x / sf, y / sf)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = state;
+        (x, y)
+    }
 }
 
 fn mark_injected() {
@@ -75,7 +86,7 @@ fn start_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-pub fn start_injector(app: AppHandle) {
+pub fn start_injector(app: AppHandle, state: Arc<AppState>) {
     let (tx, rx) = mpsc::sync_channel::<InjectCmd>(INJECT_QUEUE_CAP);
     INJECT_TX.set(tx).ok();
     // Enigo is not Send on macOS (holds raw CGEventSource pointers), so we
@@ -96,7 +107,7 @@ pub fn start_injector(app: AppHandle) {
             }
         };
         while let Ok(cmd) = rx.recv() {
-            inject_cmd(&mut enigo, cmd);
+            inject_cmd(&mut enigo, cmd, &state);
         }
         INJECT_READY.store(false, Ordering::SeqCst);
     });
@@ -182,7 +193,7 @@ pub fn inject_text(text: String) {
 }
 
 
-fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
+fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd, state: &AppState) {
     // Stamp before the enigo call (same reason as `inject`): the synthetic
     // event can be observed by rdev during the call, so the timestamp has
     // to be in place before the syscall lands.
@@ -190,12 +201,12 @@ fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
         mark_injected();
     }
     match cmd {
-        InjectCmd::Remote(event) => inject(enigo, event),
+        InjectCmd::Remote(event) => inject(enigo, event, state),
         InjectCmd::MoveRel { dx, dy } => {
             let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
         }
         InjectCmd::MoveAbs { x, y } => {
-            let (fx, fy) = logical_to_inject_xy(x as f64, y as f64);
+            let (fx, fy) = physical_to_inject_xy(x as f64, y as f64, state);
             let _ = enigo.move_mouse(fx as i32, fy as i32, Coordinate::Abs);
         }
         InjectCmd::Scroll { dx, dy } => {
@@ -227,19 +238,17 @@ fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
     // stale timestamp and misclassify the injected echo as local user input.
 }
 
-fn inject(enigo: &mut Enigo, event: InputEvent) {
+fn inject(enigo: &mut Enigo, event: InputEvent, state: &AppState) {
     // Stamp BEFORE the enigo call so the receiver's capture thread —
     // which may observe the synthetic event synchronously from the OS
     // event tap during the call — always reads a fresh LAST_INJECT_MS.
     mark_injected();
     match event {
         InputEvent::MouseMove { x, y } => {
-            // Wire coords are LOGICAL pixels. enigo on macOS uses
-            // CGWarpMouseCursorPosition which takes logical points directly,
-            // but enigo on Windows uses SetCursorPos which takes PHYSICAL
-            // pixels. Multiply by scale_factor on Windows so cursor covers
-            // the full desktop rather than only 1/sf of it.
-            let (fx, fy) = logical_to_inject_xy(x, y);
+            // Wire coords are receiver-physical virtual-desktop px (v5), in
+            // this machine's own coord space (the sender already scaled).
+            // Convert to the unit enigo expects on this platform.
+            let (fx, fy) = physical_to_inject_xy(x, y, state);
             let _ = enigo.move_mouse(fx as i32, fy as i32, Coordinate::Abs);
         }
         InputEvent::MouseButton { button, pressed } => {

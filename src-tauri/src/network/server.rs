@@ -43,6 +43,11 @@ pub async fn start_server(app: AppHandle, state: Arc<AppState>) {
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
+                // Disable Nagle so mouse-move packets ship immediately rather
+                // than coalescing for up to ~40ms. Critical for gaming feel.
+                if let Err(e) = stream.set_nodelay(true) {
+                    tracing::warn!("set_nodelay failed on accept from {}: {}", peer_addr, e);
+                }
                 tracing::info!("Connection from {}", peer_addr);
                 let app = app.clone();
                 let state = state.clone();
@@ -600,15 +605,24 @@ pub async fn handle_controller(
                                 // Decide which edge the cursor came in from by
                                 // proximity (entry_point is placed near the edge
                                 // by the controller's compute_entry_point).
-                                entry_edge = Some(
-                                    if      x_rel < 10.0      { "left" }
-                                    else if x_rel > lw - 10.0 { "right" }
-                                    else if y_rel < 10.0      { "top" }
-                                    else                      { "bottom" }
-                                );
-                                return_sent = false;
-                                departed = false;
-                            } else if !return_sent {
+                                //
+                                // v5 note: the previous fallthrough here unconditionally
+                                // labelled non-edge entries as "bottom", which caused
+                                // false ReturnToSender fires when the user moved the
+                                // cursor downward. Now we leave `entry_edge = None`
+                                // until a MouseMove genuinely lands near an edge; the
+                                // return check below is skipped in that state.
+                                entry_edge =
+                                    if      x_rel < 10.0      { Some("left") }
+                                    else if x_rel > lw - 10.0 { Some("right") }
+                                    else if y_rel < 10.0      { Some("top") }
+                                    else if y_rel > lh - 10.0 { Some("bottom") }
+                                    else                      { None };
+                                if entry_edge.is_some() {
+                                    return_sent = false;
+                                    departed = false;
+                                }
+                            } else if entry_edge.is_some() && !return_sent {
                                 // First the cursor has to move AWAY from the
                                 // entry edge by `departed_threshold`; otherwise
                                 // the entry position itself would re-satisfy

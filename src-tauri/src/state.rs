@@ -105,10 +105,16 @@ pub struct TransferInfo {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct MonitorInfo {
     pub name: String,
+    /// Position and size in **physical virtual-desktop pixels** (v5). This is
+    /// the same coordinate space rdev reports on Windows and that
+    /// `SetCursorPos` accepts under PER_MONITOR_V2. On macOS we convert
+    /// logical↔physical at the OS boundary using `scale_factor`.
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Per-monitor scale factor. Kept informational for macOS inject's
+    /// physical→logical conversion and for UI display.
     pub scale_factor: f64,
     pub is_primary: bool,
 }

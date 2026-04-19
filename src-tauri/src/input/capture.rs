@@ -9,34 +9,51 @@ use crate::screen::layout;
 use crate::input::inject;
 
 const DOUBLE_CTRL_MS: u128 = 400;
-/// Throttle mouse-move to ~120 Hz max (8 ms between sends)
-const MOUSE_MOVE_INTERVAL_MS: u128 = 8;
+/// Throttle mouse-move to ~500 Hz max (2 ms between sends). Tight enough for
+/// gaming input (most gaming mice poll at 1 kHz); going lower costs bandwidth
+/// without meaningful accuracy gain given the wire is encrypted TCP.
+const MOUSE_MOVE_INTERVAL_MS: u128 = 2;
 /// After a release, block edge activation for this long so the cursor has time
 /// to pull away from the edge without immediately re-triggering relay.
 const RELEASE_DEBOUNCE_MS: u128 = 800;
 
-/// Primary monitor's scale factor. On Windows rdev reports mouse coordinates
-/// in PHYSICAL pixels while state.monitors stores LOGICAL dims (divided by
-/// scale_factor). Normalize rdev's input to logical here so delta-scaling
-/// math stays in one coordinate system. On macOS rdev already reports
-/// logical points, so this returns 1.0.
+/// Convert rdev's raw mouse coords into our canonical wire unit: **physical
+/// virtual-desktop pixels of the sender** (v5).
+///
+/// - **Windows:** rdev hooks report physical virtual-screen coords natively
+///   under PER_MONITOR_V2 (which Tauri 2 embeds via tao's manifest).
+///   Pass-through.
+/// - **macOS:** rdev reports logical points (global display coordinate space).
+///   Multiply by the primary display's backing scale factor. Multi-monitor
+///   Mac with mixed sf across displays is a known limitation — we'd need to
+///   pick the screen under `(x, y)` and use *its* sf. See
+///   `TODO(multimon-mac-capture)`.
+/// - **Linux:** unit is fuzzy on X11/Wayland; we pass-through with sf=1.0 to
+///   preserve existing behavior.
 #[inline]
-fn rdev_to_logical_factor(state: &AppState) -> f64 {
+fn rdev_to_physical_xy(x: f64, y: f64, state: &AppState) -> (f64, f64) {
     #[cfg(target_os = "windows")]
     {
-        state
+        let _ = state;
+        (x, y)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // TODO(multimon-mac-capture): look up per-screen sf if multi-display.
+        let sf = state
             .monitors
             .read()
             .iter()
             .find(|m| m.is_primary)
             .map(|m| m.scale_factor)
             .unwrap_or(1.0)
-            .max(1e-6)
+            .max(1e-6);
+        (x * sf, y * sf)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let _ = state;
-        1.0
+        (x, y)
     }
 }
 
@@ -262,6 +279,10 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 *state.edge_first_touch.lock() = None;
                 return Some(event);
             }
+            // Normalize rdev's raw coord into sender-physical *once*. Every
+            // downstream comparison (is_at_edge, virtual_bounds, relay_entry)
+            // operates in physical space post-v5.
+            let (px, py) = rdev_to_physical_xy(x, y, state);
             let monitors = state.monitors.read().clone();
             // Only the CLIENT side (with a net_tx to send messages) should ever
             // activate relay. Without this guard, the server side would also
@@ -283,7 +304,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
             let at_edge = can_send
                 && !recently_released
                 && !is_echo
-                && layout::is_at_edge(x, y, &edge, &monitors)
+                && layout::is_at_edge(px, py, &edge, &monitors)
                 && state.connected_peer.lock().is_some();
 
             if at_edge {
@@ -297,7 +318,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 };
                 if should_activate {
                     *state.edge_first_touch.lock() = None;
-                    let (entry_x, entry_y) = compute_entry_point(x, y, &edge, &monitors, state);
+                    let (entry_x, entry_y) = compute_entry_point(px, py, &edge, &monitors, state);
 
                     // Warp the local cursor off the edge to the screen center so the OS
                     // stops clamping subsequent mouse motion (otherwise we'd only ever
@@ -386,8 +407,10 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                 *state.edge_first_touch.lock() = None;
                 return;
             }
+            // v5: normalize to sender-physical before any edge/bounds math.
+            let (px, py) = rdev_to_physical_xy(x, y, state);
             let monitors = state.monitors.read().clone();
-            let at_edge = layout::is_at_edge(x, y, &edge, &monitors)
+            let at_edge = layout::is_at_edge(px, py, &edge, &monitors)
                 && state.connected_peer.lock().is_some();
 
             if at_edge {
@@ -401,7 +424,7 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                 };
                 if should_activate {
                     *state.edge_first_touch.lock() = None;
-                    let (entry_x, entry_y) = compute_entry_point(x, y, &edge, &monitors, state);
+                    let (entry_x, entry_y) = compute_entry_point(px, py, &edge, &monitors, state);
                     let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
                     let center_x = (min_x + max_x) / 2.0;
                     let center_y = (min_y + max_y) / 2.0;
@@ -441,6 +464,11 @@ fn compute_entry_point(x: f64, y: f64, edge: &str, monitors: &[crate::state::Mon
 
 /// Convert an rdev event to an InputEvent for the network, applying throttling and
 /// delta-based coordinate remapping for mouse moves when in relay mode.
+///
+/// v5: all intermediate math runs in **sender physical virtual-desktop pixels**.
+/// `relay_entry` is stored in the same units. The receiver does the
+/// physical→physical scale on its side using `remote_screen` (which is the
+/// sender's physical dimensions we shipped via `Message::ScreenSize`).
 fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEvent> {
     match event_type {
         EventType::MouseMove { x, y } => {
@@ -458,28 +486,20 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
             });
             if !should_send { return None; }
 
+            // Normalize rdev input into sender-physical once; everything
+            // downstream (relay_entry anchor, delta math, clamp) operates in
+            // that single coordinate system.
+            let (px, py) = rdev_to_physical_xy(*x, *y, state);
+
             let entry = *state.relay_entry.lock();
             let remote = *state.remote_screen.lock();
 
             let (rx, ry) = if let Some((lx, ly, ex, ey)) = entry {
-                // Wire positions are in LOGICAL pixels of the remote's
-                // coord space. Steps:
-                //   1. Normalize rdev's raw dx/dy to logical (Windows rdev
-                //      reports physical; Mac rdev already logical).
-                //   2. Scale logical dx by remote_width / local_width so
-                //      "50% across my screen" = "50% across theirs",
-                //      regardless of resolution or DPI.
-                //   3. Add to the remote's logical entry point.
-                // The receiver translates back to its own physical pixels
-                // inside `inject.rs` if needed (Windows only).
-                let coord_scale = rdev_to_logical_factor(state);
-                let dx = (x - lx) / coord_scale;
-                let dy = (y - ly) / coord_scale;
-                // Prefer the full virtual desktop bounds (all monitors) over
-                // rdev::display_size() which only reports the primary. On a
-                // multi-monitor setup this matches what compute_entry_point
-                // uses on the edge side, so the dx/dy scaling and the entry
-                // edge math stay in the same coordinate frame.
+                // All four terms (px, py, lx, ly) are sender-physical. Compute
+                // the delta, then scale to receiver-physical using remote's
+                // dimensions / our virtual-desktop physical dimensions.
+                let dx = px - lx;
+                let dy = py - ly;
                 let monitors = state.monitors.read().clone();
                 let (bx0, by0, bx1, by1) = layout::virtual_bounds(&monitors);
                 let (lw, lh) = ((bx1 - bx0).max(1.0), (by1 - by0).max(1.0));
@@ -496,7 +516,7 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
                     (nx.max(0.0), ny.max(0.0))
                 }
             } else {
-                (*x, *y)
+                (px, py)
             };
 
             Some(InputEvent::MouseMove { x: rx, y: ry })

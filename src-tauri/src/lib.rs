@@ -32,9 +32,7 @@ pub fn run() {
             let state = Arc::new(AppState::new());
             app.manage(state.clone());
 
-            // Populate monitor info at startup. All geometry is stored in
-            // LOGICAL pixels to match rdev's mouse-coordinate space (see
-            // Bug #14 comment in commands::get_monitors).
+            // v5: monitor geometry stored in PHYSICAL virtual-desktop pixels.
             if let Some(win) = app.get_webview_window("main") {
                 if let Ok(primary) = win.primary_monitor() {
                     if let Ok(available) = win.available_monitors() {
@@ -52,18 +50,15 @@ pub fn run() {
                                 let sz = m.size();
                                 state::MonitorInfo {
                                     name: m.name().map(|s| s.as_str()).unwrap_or("Display").to_string(),
-                                    x: ((pos.x as f64) / sf).round() as i32,
-                                    y: ((pos.y as f64) / sf).round() as i32,
-                                    width: ((sz.width as f64) / sf).round() as u32,
-                                    height: ((sz.height as f64) / sf).round() as u32,
+                                    x: pos.x as i32,
+                                    y: pos.y as i32,
+                                    width: sz.width,
+                                    height: sz.height,
                                     scale_factor: sf,
                                     is_primary,
                                 }
                             })
                             .collect();
-                        if let Some(p) = monitors.iter().find(|m| m.is_primary).or_else(|| monitors.first()) {
-                            crate::input::inject::set_primary_scale(p.scale_factor);
-                        }
                         *state.monitors.write() = monitors;
                     }
                 }
@@ -123,7 +118,7 @@ pub fn run() {
                 rt.block_on(network::start_all_services(app_handle, state_bg));
             });
 
-            input::inject::start_injector(app.handle().clone());
+            input::inject::start_injector(app.handle().clone(), state.clone());
             input::capture::start(app.handle().clone(), state.clone());
             start_clipboard_writer(state.clone());
 
@@ -275,27 +270,21 @@ fn refresh_monitors(app: &AppHandle, state: &Arc<AppState>) {
                 .zip(m.name())
                 .map(|(a, b)| a == b)
                 .unwrap_or(false);
-            // LOGICAL pixels (see Bug #14 note in commands::get_monitors).
+            // v5: PHYSICAL virtual-desktop pixels (see commands::get_monitors).
             let sf = m.scale_factor().max(1e-6);
             let pos = m.position();
             let sz = m.size();
             state::MonitorInfo {
                 name: m.name().map(|s| s.as_str()).unwrap_or("Display").to_string(),
-                x: ((pos.x as f64) / sf).round() as i32,
-                y: ((pos.y as f64) / sf).round() as i32,
-                width: ((sz.width as f64) / sf).round() as u32,
-                height: ((sz.height as f64) / sf).round() as u32,
+                x: pos.x as i32,
+                y: pos.y as i32,
+                width: sz.width,
+                height: sz.height,
                 scale_factor: sf,
                 is_primary,
             }
         })
         .collect();
-    // Tell the inject layer the current primary scale factor so it can
-    // convert logical wire coords to physical pixels for SetCursorPos on
-    // Windows. On macOS this is informational (enigo takes logical).
-    if let Some(primary) = monitors.iter().find(|m| m.is_primary).or_else(|| monitors.first()) {
-        crate::input::inject::set_primary_scale(primary.scale_factor);
-    }
     *state.monitors.write() = monitors;
 }
 
