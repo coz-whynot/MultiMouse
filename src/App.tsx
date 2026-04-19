@@ -23,6 +23,19 @@ interface ReconnectState {
   failed: boolean;
 }
 
+/** Compare two dotted semver strings ("0.2.0" vs "0.1.9"). Returns 1 / 0 / -1. */
+function cmpSemver(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
+
 export default function App() {
   const {
     currentPage,
@@ -46,6 +59,9 @@ export default function App() {
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [reconnectState, setReconnectState] = useState<ReconnectState | null>(null);
   const [idleLockMsg, setIdleLockMsg] = useState<string | null>(null);
+  // Peer reported a newer app version → show a one-click update nudge.
+  const [peerNewerVersion, setPeerNewerVersion] = useState<string | null>(null);
+  const [updateNudgeBusy, setUpdateNudgeBusy] = useState(false);
   const reconnectDismissTimer = useRef<number | null>(null);
   const peersRef = useRef(peers);
   peersRef.current = peers;
@@ -112,6 +128,17 @@ export default function App() {
     };
 
     const unlisten = Promise.all([
+      listen<string>('peer-version', async (e) => {
+        // Compare to our own app version; nudge only if the peer is ahead.
+        try {
+          const { getVersion } = await import('@tauri-apps/api/app');
+          const ours = await getVersion();
+          const peer = (e.payload ?? '').trim();
+          if (peer && cmpSemver(peer, ours) > 0) {
+            setPeerNewerVersion(peer);
+          }
+        } catch {}
+      }),
       listen('peers-updated', refresh),
       listen('connected', () => {
         markEvent();
@@ -312,6 +339,76 @@ export default function App() {
       }}
     >
       <TitleBar />
+
+      {/* Peer-newer-version nudge — triggered by the PeerVersion protocol
+          message. One-click "Update" runs the same tauri-plugin-updater
+          flow as Settings → About's Check-for-update button. */}
+      <AnimatePresence>
+        {peerNewerVersion && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mx-5 mt-1 overflow-hidden"
+          >
+            <div
+              className="rounded-xl px-4 py-2.5 flex items-center gap-3 mb-1"
+              style={{
+                background: 'var(--accent-soft-bg)',
+                border: '1px solid var(--accent-soft-br)',
+              }}
+            >
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="var(--accent-primary)" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0l-4 4m4-4v12" />
+              </svg>
+              <p className="text-[12px] flex-1 min-w-0" style={{ color: 'var(--text-secondary)' }}>
+                Your peer is on v{peerNewerVersion}. Update this device to match.
+              </p>
+              <button
+                disabled={updateNudgeBusy}
+                onClick={async () => {
+                  setUpdateNudgeBusy(true);
+                  try {
+                    const { check } = await import('@tauri-apps/plugin-updater');
+                    const { relaunch } = await import('@tauri-apps/plugin-process');
+                    const result = await check();
+                    if (result?.available) {
+                      await result.downloadAndInstall();
+                      await relaunch();
+                    } else {
+                      // Peer reported newer, but our updater can't find a release yet
+                      setErrorMsg('No release available yet — try again shortly.');
+                      setPeerNewerVersion(null);
+                    }
+                  } catch (err) {
+                    console.error('update failed', err);
+                    setErrorMsg('Update failed — try again from Settings.');
+                  } finally {
+                    setUpdateNudgeBusy(false);
+                  }
+                }}
+                className="text-[11px] font-bold rounded-lg px-2.5 py-1 transition-all active:scale-95 disabled:opacity-50 flex-shrink-0"
+                style={{
+                  background: 'var(--accent-primary)',
+                  color: 'var(--text-inverse)',
+                }}
+              >
+                {updateNudgeBusy ? 'Updating…' : 'Update'}
+              </button>
+              <button
+                onClick={() => setPeerNewerVersion(null)}
+                className="flex-shrink-0 transition-colors"
+                style={{ color: 'var(--text-muted)' }}
+                aria-label="Dismiss"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Reconnect banner */}
       <AnimatePresence>

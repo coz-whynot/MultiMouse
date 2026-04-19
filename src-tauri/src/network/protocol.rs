@@ -69,6 +69,13 @@ pub enum Message {
     /// edge and drops relay — same effect as pressing Esc, but driven by the
     /// natural "push through the other edge" gesture instead of a hotkey.
     ReturnToSender,
+    /// Sent by both sides right after auth completes. Reports the sender's
+    /// app version (not protocol version). Receiver compares with its own
+    /// version; if peer is newer, UI nudges the local user to update via
+    /// the existing Tauri updater. No auto-install — just a banner.
+    PeerVersion {
+        app_version: String,
+    },
     Bye,
 }
 

@@ -153,6 +153,16 @@ pub async fn connect_stream(
     )
     .await;
 
+    // Announce our app version so the peer can nudge us to update if we're
+    // behind. (Protocol version is already enforced by the handshake; this
+    // is purely an app-version courtesy for "same protocol, newer build".)
+    send_enc_message(
+        &mut stream,
+        &Message::PeerVersion { app_version: env!("CARGO_PKG_VERSION").into() },
+        &mut send_enc,
+    )
+    .await;
+
     {
         let mut peers = state.peers.lock();
         if let Some(p) = peers.iter_mut().find(|p| p.id == peer.id) {
@@ -250,6 +260,9 @@ pub async fn connect_stream(
             }
             Message::ActiveWindow { app_name } => {
                 let _ = app.emit("remote-active-window", app_name);
+            }
+            Message::PeerVersion { app_version } => {
+                let _ = app.emit("peer-version", app_version);
             }
             Message::ReturnToSender => {
                 // Receiver's cursor hit the far edge — user wants us to take

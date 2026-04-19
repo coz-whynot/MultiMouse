@@ -368,6 +368,15 @@ pub async fn handle_controller(
         *state.remote_screen.lock() = Some((width, height));
     }
 
+    // Exchange app versions so each side can nudge the other to update if
+    // they're behind. Protocol version is already enforced — this is for
+    // the app-version nudge only (same protocol, different app versions).
+    send_enc_message(
+        &mut stream,
+        &Message::PeerVersion { app_version: env!("CARGO_PKG_VERSION").into() },
+        &mut send_enc,
+    ).await;
+
     // Idle watchdog: the read loop no longer wraps read_enc_message in a
     // timeout (which was NOT cancel-safe — a large clipboard image taking
     // >30s to arrive would lose bytes mid-read). Instead, a separate task
@@ -531,6 +540,9 @@ pub async fn handle_controller(
                             state.add_bytes_sent(data.len() as u64 + 32);
                         }
                         send_enc_message(&mut stream, &pong, &mut send_enc).await;
+                    }
+                    Message::PeerVersion { app_version } => {
+                        let _ = app.emit("peer-version", app_version);
                     }
                     Message::Bye => break,
                     _ => {}
