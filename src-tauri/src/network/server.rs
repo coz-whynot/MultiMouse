@@ -238,9 +238,16 @@ pub async fn handle_controller(
                 .unwrap_or(false);
             (ok, None)
         }
-        Message::PinRequest { .. } => {
+        Message::PinRequest { pin: wire_pin } => {
+            // Bind the wire PIN to the handshake-derived SAS. Under a MitM the
+            // client's SAS differs from the server's, so the compare fails and
+            // the user is never shown a prompt at all. Constant-time compare to
+            // avoid any timing oracle on the SAS.
+            if !bool::from(wire_pin.as_bytes().ct_eq(sas_pin.as_bytes())) {
+                tracing::warn!("PinRequest rejected — SAS mismatch (possible MitM)");
+                (false, None)
             // Reject if a pairing is already in progress
-            if state.pending_pairing.lock().is_some() {
+            } else if state.pending_pairing.lock().is_some() {
                 (false, None)
             } else {
                 // The pairing PIN is derived from the encryption handshake (SAS).
@@ -335,6 +342,10 @@ pub async fn handle_controller(
     };
     if !swap_ok {
         tracing::warn!("Lost the provisional slot race for {} — aborting session", peer_id);
+        // Route through cleanup so PeerStatus, audit log, and emitted events
+        // don't diverge from connected_peer. Previously this early-return left
+        // the peer stuck in Connected status until the next real session.
+        cleanup(&app, &state, &peer_id, &peer_name, &peer_ip).await;
         return;
     }
     state.reset_bandwidth();
@@ -459,7 +470,9 @@ pub async fn handle_controller(
                             if let Ok(data) = serde_json::to_vec(&out) {
                                 state.add_bytes_sent(data.len() as u64 + 32);
                             }
-                            send_enc_message(&mut stream, &out, &mut send_enc).await;
+                            if !send_enc_message(&mut stream, &out, &mut send_enc).await {
+                                break;
+                            }
                         }
                         last_active_window = current;
                     }
@@ -537,7 +550,12 @@ pub async fn handle_controller(
                                 };
                                 if at_return_edge {
                                     return_sent = true;
-                                    send_enc_message(&mut stream, &Message::ReturnToSender, &mut send_enc).await;
+                                    // If the write fails the channel is dead;
+                                    // break the read loop so cleanup runs instead
+                                    // of continuing with a half-broken session.
+                                    if !send_enc_message(&mut stream, &Message::ReturnToSender, &mut send_enc).await {
+                                        break;
+                                    }
                                     state.set_controlled(false);
                                     let _ = app.emit("focus-released", ());
                                     tracing::info!("Cursor reached return edge {:?} — sent ReturnToSender", entry_edge);
@@ -573,7 +591,9 @@ pub async fn handle_controller(
                         if let Ok(data) = serde_json::to_vec(&pong) {
                             state.add_bytes_sent(data.len() as u64 + 32);
                         }
-                        send_enc_message(&mut stream, &pong, &mut send_enc).await;
+                        if !send_enc_message(&mut stream, &pong, &mut send_enc).await {
+                            break;
+                        }
                     }
                     Message::PeerVersion { app_version } => {
                         let _ = app.emit("peer-version", app_version);
@@ -604,6 +624,12 @@ fn set_clipboard(state: &AppState, text: String) {
 }
 
 fn set_clipboard_image(state: &AppState, width: u32, height: u32, bytes: Vec<u8>) {
+    // Reject dims that don't match the payload or exceed a hard ceiling.
+    // arboard trusts width/height as usize and will over-read or over-allocate
+    // if a peer sends bogus values.
+    if width == 0 || height == 0 || width > 8192 || height > 8192 { return; }
+    let expected = (width as u64).saturating_mul(height as u64).saturating_mul(4);
+    if expected != bytes.len() as u64 { return; }
     if let Some(tx) = state.clipboard_tx.lock().as_ref() {
         let _ = tx.try_send(crate::state::ClipboardSet::Image { width, height, bytes });
     }

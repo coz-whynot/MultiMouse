@@ -1,7 +1,7 @@
 {
   "name": "multimouse",
   "private": true,
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,7 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-opener": "^2.2.4",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "framer-motion": "^12.38.0",

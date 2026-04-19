@@ -6,6 +6,9 @@ export interface PeerInfo {
   status: 'available' | 'connected' | 'pairing' | 'error';
   ping_ms?: number;
   is_known: boolean;
+  /** Peer's advertised app version from mDNS TXT. Missing if peer is on an
+   *  older build that didn't advertise it. */
+  app_version?: string | null;
 }
 
 export interface ScreenSize {

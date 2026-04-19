@@ -5,6 +5,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tauri::{AppHandle, Emitter};
 use base64::Engine;
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::state::{AppState, TransferInfo};
@@ -56,7 +57,10 @@ async fn handle_incoming(
     let (device_id, peer_name) = match read_enc_transfer_msg(&mut stream, &mut recv_enc).await {
         Some(TransferMessage::Auth { session_key, device_id }) => {
             match storage::get_known_device(&device_id) {
-                Some(d) if d.session_key == session_key => (device_id, d.name),
+                // Constant-time compare so timing doesn't leak key bytes.
+                Some(d) if bool::from(d.session_key.as_bytes().ct_eq(session_key.as_bytes())) => {
+                    (device_id, d.name)
+                }
                 _ => {
                     let _ = send_enc_transfer_msg(&mut stream, &TransferMessage::AuthFail, &mut send_enc).await;
                     return;
@@ -65,6 +69,14 @@ async fn handle_incoming(
         }
         _ => return,
     };
+
+    // Bind transfers to the live control session. A peer that once paired and
+    // then went away cannot later push files without re-establishing the
+    // encrypted control channel first.
+    if state.connected_peer.lock().as_deref() != Some(device_id.as_str()) {
+        let _ = send_enc_transfer_msg(&mut stream, &TransferMessage::AuthFail, &mut send_enc).await;
+        return;
+    }
 
     if !send_enc_transfer_msg(&mut stream, &TransferMessage::AuthOk, &mut send_enc).await {
         return;
@@ -166,6 +178,13 @@ async fn handle_incoming(
                             break;
                         }
                     };
+                // Reject a chunk that would push past the advertised file
+                // size — a malicious sender cannot grow the write beyond
+                // what the user accepted.
+                if received.saturating_add(bytes.len() as u64) > file_size {
+                    set_status(&state, &transfer_id, "error");
+                    break;
+                }
                 if file.write_all(&bytes).await.is_err() {
                     set_status(&state, &transfer_id, "error");
                     break;

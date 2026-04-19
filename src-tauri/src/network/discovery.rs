@@ -27,6 +27,9 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
     let mut props = std::collections::HashMap::new();
     props.insert("id".to_string(), state.device_id.clone());
     props.insert("v".to_string(), "1".to_string());
+    // Advertise our app version so peers can show it on their nearby list
+    // (and decide to offer an in-app update when they're older).
+    props.insert("av".to_string(), env!("CARGO_PKG_VERSION").to_string());
 
     let instance = state.device_name.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
     match ServiceInfo::new(
@@ -66,6 +69,11 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                     continue;
                 }
 
+                let peer_version = info
+                    .get_properties()
+                    .get_property_val_str("av")
+                    .map(|s| s.to_string());
+
                 let addr = info
                     .get_addresses()
                     .iter()
@@ -94,6 +102,7 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                     ping_ms: None,
                     is_known: false,
                     last_seen: now_unix,
+                    app_version: peer_version.clone(),
                 };
 
                 // Track fullname → id so ServiceRemoved removes the right
@@ -108,6 +117,11 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                     existing.addr = peer.addr.clone();
                     existing.port = peer.port;
                     existing.last_seen = now_unix;
+                    // Update advertised version; peers that upgrade mid-session
+                    // re-announce via mDNS and we pick it up here.
+                    if peer_version.is_some() {
+                        existing.app_version = peer_version;
+                    }
                 } else {
                     peers.push(peer);
                 }

@@ -19,6 +19,10 @@ pub struct PeerInfo {
     /// network without sending a ServiceRemoved event (common on flaky Wi-Fi).
     #[serde(default = "unix_now")]
     pub last_seen: i64,
+    /// Advertised app version string from the peer's mDNS TXT record ("av").
+    /// None if the peer is on an older build that didn't advertise it.
+    #[serde(default)]
+    pub app_version: Option<String>,
 }
 
 fn unix_now() -> i64 {
@@ -182,6 +186,10 @@ pub struct AppState {
     /// message at a time — older messages are dropped under flood so we never
     /// spawn a thread per clipboard event.
     pub clipboard_tx: Mutex<Option<std::sync::mpsc::SyncSender<ClipboardSet>>>,
+    /// Join handle of the currently-running reconnect-with-backoff task, if
+    /// any. When the user initiates a new connection we abort the old handle
+    /// so a stale loop can't race with the new session.
+    pub reconnect_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Commands for the persistent clipboard-writer thread. Only the latest
@@ -235,6 +243,15 @@ impl AppState {
             edge_first_touch: Mutex::new(None),
             last_release: Mutex::new(None),
             clipboard_tx: Mutex::new(None),
+            reconnect_handle: Mutex::new(None),
+        }
+    }
+
+    /// Abort any running auto-reconnect loop. Call before spawning a new
+    /// session so a stale loop can't race with the fresh connect attempt.
+    pub fn abort_reconnect(&self) {
+        if let Some(h) = self.reconnect_handle.lock().take() {
+            h.abort();
         }
     }
 
@@ -257,10 +274,14 @@ impl AppState {
 
     /// Reset the edge-dwell and release-debounce timers. MUST be called on
     /// every disconnect path — stale values across reconnect caused either
-    /// instant relay activation or a skipped dwell window.
+    /// instant relay activation or a skipped dwell window. Also clears the
+    /// double-Ctrl hotkey latch so a reconnect can't inherit a stale press
+    /// timestamp from the previous session and fire the hotkey on the first
+    /// Ctrl of the new session.
     pub fn reset_edge_state(&self) {
         *self.edge_first_touch.lock() = None;
         *self.last_release.lock() = None;
+        *self.last_ctrl_press.lock() = None;
     }
 
     /// Kick the server's main read loop — used by the receiver's Esc escape hatch

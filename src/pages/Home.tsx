@@ -50,7 +50,7 @@ const RadarSweep = () => (
 );
 
 export const Home = () => {
-  const { peers, status, connectingTo, setConnectingTo, shownPin } = useStore();
+  const { peers, status, connectingTo, setConnectingTo, shownPin, setErrorMsg } = useStore();
   const [showInternet, setShowInternet] = useState(false);
   const [accessibilityNeeded, setAccessibilityNeeded] = useState(false);
 
@@ -75,8 +75,8 @@ export const Home = () => {
     try {
       await invoke('connect_to_device', { peerId, pin: '' });
     } catch (e) {
-      console.error(e);
       setConnectingTo(null);
+      setErrorMsg(`Connect failed: ${String(e)}`);
     }
   };
 

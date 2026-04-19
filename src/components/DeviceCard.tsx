@@ -1,6 +1,9 @@
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
 import { PeerInfo } from '../types';
+import { useStore } from '../store/useStore';
+import { cmpSemver } from '../App';
 
 // TODO: display a "last seen" timestamp for offline/paired-but-absent peers.
 // Planned: backend needs to track and expose a `last_seen` field on PeerInfo/KnownDevice
@@ -61,6 +64,33 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
   const pal = pickPalette(peer.name);
   const initial = peer.name.charAt(0).toUpperCase();
   const clickable = !isConnected && !isConnecting;
+  const ownVersion = useStore((s) => s.appVersion);
+  const setErrorMsg = useStore((s) => s.setErrorMsg);
+  const peerVersion = peer.app_version ?? null;
+  const peerIsNewer =
+    ownVersion != null && peerVersion != null && cmpSemver(peerVersion, ownVersion) > 0;
+  const [updating, setUpdating] = useState(false);
+
+  const runUpdate = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (updating) return;
+    setUpdating(true);
+    try {
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      const result = await check();
+      if (result?.available) {
+        await result.downloadAndInstall();
+        await relaunch();
+      } else {
+        setErrorMsg('No release available yet — try again in a minute.');
+      }
+    } catch (err) {
+      setErrorMsg(`Update failed: ${String(err)}`);
+    } finally {
+      setUpdating(false);
+    }
+  };
 
   return (
     <motion.div
@@ -133,6 +163,19 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
               Paired
             </span>
           )}
+          {peerVersion && (
+            <span
+              className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
+              title={peerIsNewer ? 'Peer is on a newer build than this device' : 'Peer app version'}
+              style={{
+                background: peerIsNewer ? 'rgba(251,191,36,0.15)' : 'rgba(148,163,184,0.14)',
+                color: peerIsNewer ? '#fbbf24' : 'var(--text-muted)',
+                border: `1px solid ${peerIsNewer ? 'rgba(251,191,36,0.35)' : 'rgba(148,163,184,0.22)'}`,
+              }}
+            >
+              v{peerVersion}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs">
@@ -165,6 +208,25 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
             title="End session with this device"
           >
             End
+          </button>
+        </div>
+      ) : peerIsNewer && !isConnected ? (
+        <div className="flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={runUpdate}
+            disabled={updating}
+            className="text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-all active:scale-95 flex items-center gap-1 disabled:opacity-50"
+            style={{
+              background: 'rgba(251,191,36,0.18)',
+              color: '#fbbf24',
+              border: '1px solid rgba(251,191,36,0.35)',
+            }}
+            title={`Peer is on v${peerVersion}. Tap to update this device.`}
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" />
+            </svg>
+            {updating ? 'Updating…' : 'Update'}
           </button>
         </div>
       ) : peer.is_known && peer.status === 'available' ? (

@@ -142,6 +142,7 @@ pub async fn join_session(
         ping_ms: None,
         is_known: false,
         last_seen: now_unix,
+        app_version: None,
     };
 
     crate::network::client::connect_stream(app, state, stream, peer, pin, None).await;

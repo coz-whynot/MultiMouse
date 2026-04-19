@@ -23,7 +23,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -74,8 +74,14 @@ pub fn run() {
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = Menu::with_items(app, &[&show, &release, &disconnect, &gaming, &sep, &quit])?;
 
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            // `default_window_icon()` can return None on Linux AppImage where
+            // the icon resource isn't always registered by tauri-build. Use the
+            // bundled PNG as a last resort rather than panicking at startup.
+            let mut tray_builder = TrayIconBuilder::new();
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+            let _tray = tray_builder
                 .menu(&menu)
                 .tooltip("MultiMouse")
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -154,14 +160,20 @@ pub fn run() {
                     && state_idle.connected_peer.lock().is_some()
                 {
                     tracing::info!("Idle auto-lock triggered ({} min)", minutes);
-                    // Graceful disconnect so Bye reaches the peer and they
-                    // also drop the session instead of waiting for a TCP timeout.
+                    state_idle.mark_intentional_disconnect();
+                    state_idle.abort_reconnect();
+                    // Also wake any running server-side read loop so cleanup
+                    // runs promptly (otherwise the read loop only breaks when
+                    // the next frame arrives, delaying the UI event).
+                    state_idle.signal_disconnect();
                     let state_for_task = state_idle.clone();
                     tauri::async_runtime::spawn(async move {
                         crate::state::disconnect_gracefully(&state_for_task).await;
                     });
                     let _ = app_idle.emit("idle-lock-triggered", ());
-                    let _ = app_idle.emit("disconnected", ());
+                    // `disconnected` is emitted once by whichever cleanup path
+                    // actually tears down the session — do not duplicate it
+                    // here.
                 }
             });
 

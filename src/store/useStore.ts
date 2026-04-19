@@ -20,6 +20,9 @@ interface Store {
   transfers: TransferInfo[];
   fileOffer: FileOffer | null;
   incomingDeepLink: IncomingDeepLink | null;
+  errorMsg: string | null;
+  /** Our own app version, loaded once at startup. */
+  appVersion: string | null;
 
   setPeers: (peers: PeerInfo[]) => void;
   setStatus: (status: AppStatus) => void;
@@ -31,6 +34,10 @@ interface Store {
   setTransfers: (transfers: TransferInfo[]) => void;
   setFileOffer: (offer: FileOffer | null) => void;
   setIncomingDeepLink: (link: IncomingDeepLink | null) => void;
+  /// Push a banner message; null clears. Components without access to
+  /// App.tsx's local state surface errors by calling this.
+  setErrorMsg: (msg: string | null) => void;
+  setAppVersion: (v: string | null) => void;
 }
 
 export const useStore = create<Store>((set) => ({
@@ -44,6 +51,8 @@ export const useStore = create<Store>((set) => ({
   transfers: [],
   fileOffer: null,
   incomingDeepLink: null,
+  errorMsg: null,
+  appVersion: null,
 
   setPeers: (peers) => set({ peers }),
   setStatus: (status) => set({ status }),
@@ -55,4 +64,6 @@ export const useStore = create<Store>((set) => ({
   setTransfers: (transfers) => set({ transfers }),
   setFileOffer: (offer) => set({ fileOffer: offer }),
   setIncomingDeepLink: (link) => set({ incomingDeepLink: link }),
+  setErrorMsg: (msg) => set({ errorMsg: msg }),
+  setAppVersion: (v) => set({ appVersion: v }),
 }));

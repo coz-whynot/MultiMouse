@@ -111,7 +111,13 @@ pub async fn connect_stream(
             serde_json::json!({ "peer_id": peer.id, "pin": sas_pin }),
         );
 
-        send_enc_message(&mut stream, &Message::PinRequest { pin }, &mut send_enc).await;
+        // Send our handshake-derived SAS as the wire PIN so the server can
+        // constant-time compare it to its own SAS and reject before prompting
+        // the user. Under MitM the two SAS values differ by design.
+        // (The `pin` parameter is unused in the normal flow — retained only
+        // for API compatibility with deep-link / relay code paths.)
+        let _ = pin;
+        send_enc_message(&mut stream, &Message::PinRequest { pin: sas_pin.clone() }, &mut send_enc).await;
 
         match read_enc_message(&mut stream, &mut recv_enc).await {
             Some(Message::PinResponse { accepted: true, session_key }) => {
@@ -321,12 +327,16 @@ pub async fn connect_stream(
     if !state.was_intentional_disconnect() {
         let session_key = storage::get_session_key(&peer.id);
         if session_key.is_some() && !peer.addr.is_empty() {
-            tokio::spawn(reconnect_with_backoff(
+            // Abort any already-running reconnect loop before spawning a new
+            // one so two loops can't race on `connected_peer`.
+            state.abort_reconnect();
+            let handle = tokio::spawn(reconnect_with_backoff(
                 app.clone(),
                 state.clone(),
                 peer.clone(),
                 session_key.clone(),
             ));
+            *state.reconnect_handle.lock() = Some(handle);
         }
     }
 }

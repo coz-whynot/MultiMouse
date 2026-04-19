@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { listen } from '@tauri-apps/api/event';
 
 interface Ripple {
   id: number;
@@ -17,6 +16,7 @@ interface Ripple {
  */
 export const CursorLandingOverlay = () => {
   const [ripples, setRipples] = useState<Ripple[]>([]);
+  const timers = useRef<number[]>([]);
 
   useEffect(() => {
     let nextId = 1;
@@ -28,18 +28,23 @@ export const CursorLandingOverlay = () => {
       const y = window.innerHeight / 2;
       const id = nextId++;
       setRipples((prev) => [...prev, { id, x, y }]);
-      window.setTimeout(() => {
+      const t = window.setTimeout(() => {
         setRipples((prev) => prev.filter((r) => r.id !== id));
+        timers.current = timers.current.filter((x) => x !== t);
       }, 900);
+      timers.current.push(t);
     };
 
-    const unlisten = listen('focus-acquired', () => spawn());
-    // Trigger one on mount as well (component is conditionally rendered
-    // when is_controlled flips true, which happens right on focus-acquired).
+    // Rely on mount-triggered spawn — the overlay is conditionally rendered
+    // when is_controlled flips true, which App.tsx does in response to
+    // `focus-acquired`. Unmount on release means the next acquisition is a
+    // fresh mount and ripples again. A separate listener would double-fire
+    // on first mount alongside this spawn().
     spawn();
 
     return () => {
-      unlisten.then((fn) => fn()).catch(() => {});
+      for (const t of timers.current) window.clearTimeout(t);
+      timers.current = [];
     };
   }, []);
 

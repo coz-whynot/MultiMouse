@@ -80,8 +80,15 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
   // root [data-theme] node, so we no longer need to branch per-theme here.
   const settings = useStore((s) => s.settings);
   const setSettings = useStore((s) => s.setSettings);
-  const handleDisconnect = () => invoke('disconnect');
-  const handleRelease = () => invoke('release_cursor');
+  const setErrorMsg = useStore((s) => s.setErrorMsg);
+  const handleDisconnect = async () => {
+    try { await invoke('disconnect'); }
+    catch (e) { setErrorMsg(`Disconnect failed: ${String(e)}`); }
+  };
+  const handleRelease = async () => {
+    try { await invoke('release_cursor'); }
+    catch (e) { setErrorMsg(`Release failed: ${String(e)}`); }
+  };
 
   const blurOn = settings?.privacy_blur_on_relay === true;
   const toggleBlur = async () => {

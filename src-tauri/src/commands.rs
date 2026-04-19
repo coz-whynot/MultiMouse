@@ -66,6 +66,9 @@ pub async fn connect_to_device(
     // disconnect" latch so auto-reconnect is allowed to run again if this
     // session drops unexpectedly.
     state.reset_disconnect_flag();
+    // Abort any stale auto-reconnect loop left over from a previous peer so
+    // it can't race with this session's connect on `connected_peer`.
+    state.abort_reconnect();
 
     // Guard: mark peer as Pairing to prevent duplicate connection attempts
     let peer = {
@@ -94,6 +97,7 @@ pub async fn connect_to_device(
 #[tauri::command]
 pub async fn disconnect(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.mark_intentional_disconnect();
+    state.abort_reconnect();
     state.set_relaying(false);
     // Also raise the server_disconnect notify: if *this* device is the server
     // half of the session (peer initiated the connection), the server's read

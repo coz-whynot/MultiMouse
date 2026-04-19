@@ -24,7 +24,7 @@ interface ReconnectState {
 }
 
 /** Compare two dotted semver strings ("0.2.0" vs "0.1.9"). Returns 1 / 0 / -1. */
-function cmpSemver(a: string, b: string): number {
+export function cmpSemver(a: string, b: string): number {
   const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
   const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
   const len = Math.max(pa.length, pb.length);
@@ -53,9 +53,12 @@ export default function App() {
     setFileOffer,
     incomingDeepLink,
     setIncomingDeepLink,
+    errorMsg,
+    setErrorMsg,
+    setAppVersion,
   } = useStore();
 
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [reconnectState, setReconnectState] = useState<ReconnectState | null>(null);
   const [idleLockMsg, setIdleLockMsg] = useState<string | null>(null);
@@ -64,7 +67,9 @@ export default function App() {
   const [updateNudgeBusy, setUpdateNudgeBusy] = useState(false);
   const reconnectDismissTimer = useRef<number | null>(null);
   const peersRef = useRef(peers);
-  peersRef.current = peers;
+  useEffect(() => {
+    peersRef.current = peers;
+  }, [peers]);
   // Tracks the most recent push-event timestamp so the 3s poll can avoid
   // overwriting event-driven state during narrow transition windows. When a
   // focus/relay/connection event fires and then the poll reads the backend
@@ -111,6 +116,14 @@ export default function App() {
 
   useEffect(() => {
     refresh();
+    // Load our own version once so DeviceCard / banners can compare against
+    // peer-advertised versions without re-importing @tauri-apps/api/app.
+    (async () => {
+      try {
+        const { getVersion } = await import('@tauri-apps/api/app');
+        setAppVersion(await getVersion());
+      } catch {}
+    })();
 
     const lookupPeerName = (id: string): string => {
       const p = peersRef.current.find((x) => x.id === id);
@@ -153,6 +166,9 @@ export default function App() {
       listen('disconnected', () => {
         markEvent();
         setShownPin(null);
+        // A pairing prompt still sitting open after disconnect is stale —
+        // clear it so the next pairing doesn't surface the previous peer.
+        setPairingRequest(null);
         // Optimistically clear event-driven fields so the UI updates instantly.
         const existing = useStore.getState().status;
         if (existing) {
@@ -658,7 +674,12 @@ export default function App() {
           <PinDisplay
             peerName={pairingRequest.peer_name}
             pin={pairingRequest.pin}
-            onClose={() => setPairingRequest(null)}
+            onClose={() => {
+              setPairingRequest(null);
+              // Also clear the client-side SAS or Home.tsx's connecting overlay
+              // will keep showing an old PIN into the next pairing attempt.
+              setShownPin(null);
+            }}
           />
         )}
       </AnimatePresence>
