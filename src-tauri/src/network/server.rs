@@ -165,6 +165,7 @@ pub async fn handle_controller(
     let msg = match read_enc_message(&mut stream, &mut recv_enc).await {
         Some(m) => m,
         None => {
+            tracing::warn!("Hello read failed (EOF/decrypt) from {}", peer_addr);
             clear_pending_if_ours(&state);
             return;
         }
@@ -172,7 +173,8 @@ pub async fn handle_controller(
 
     let (peer_id, peer_name, peer_version) = match msg {
         Message::Hello { device_id, device_name, version } => (device_id, device_name, version),
-        _ => {
+        other => {
+            tracing::warn!("Expected Hello from {}, got {:?}", peer_addr, other);
             clear_pending_if_ours(&state);
             return;
         }
@@ -226,6 +228,7 @@ pub async fn handle_controller(
     let auth_msg = match read_enc_message(&mut stream, &mut recv_enc).await {
         Some(m) => m,
         None => {
+            tracing::warn!("Auth read failed from {}", peer_addr);
             clear_pending_if_ours(&state);
             return;
         }
@@ -365,10 +368,26 @@ pub async fn handle_controller(
         action: "connected".to_string(),
     });
 
-    let (w, h) = rdev::display_size().unwrap_or((1920, 1080));
+    // Prefer the virtual-desktop bounds (spans all monitors) over
+    // `rdev::display_size()` which reports only the primary monitor — on a
+    // multi-monitor host the peer otherwise can't reach our secondary
+    // displays via delta scaling.
+    let (bx0, by0, bx1, by1) = {
+        let monitors = state.monitors.read().clone();
+        crate::screen::layout::virtual_bounds(&monitors)
+    };
+    let (w, h) = if bx1 > bx0 && by1 > by0 {
+        (bx1 - bx0, by1 - by0)
+    } else {
+        let (pw, ph) = rdev::display_size().unwrap_or_else(|e| {
+            tracing::warn!("rdev::display_size failed ({:?}), falling back to 1920x1080", e);
+            (1920, 1080)
+        });
+        (pw as f64, ph as f64)
+    };
     send_enc_message(
         &mut stream,
-        &Message::ScreenSize { width: w as f64, height: h as f64 },
+        &Message::ScreenSize { width: w, height: h },
         &mut send_enc,
     )
     .await;
@@ -388,10 +407,50 @@ pub async fn handle_controller(
         &mut send_enc,
     ).await;
 
-    // Idle watchdog: the read loop no longer wraps read_enc_message in a
-    // timeout (which was NOT cancel-safe — a large clipboard image taking
-    // >30s to arrive would lose bytes mid-read). Instead, a separate task
-    // samples `state.last_activity` every 5 seconds and signals disconnect
+    // Split the stream into reader/writer halves and run the session as three
+    // cooperating tasks, matching the client architecture:
+    //
+    //   * writer task  — owns `send_enc` + the write half. Drains a channel and
+    //                    calls `send_enc_message`. This is the ONLY place that
+    //                    writes to the socket, so there's no lock contention
+    //                    and no shared mutable encryption state.
+    //   * active-window task — 1 Hz tick, pushes `ActiveWindow` on the channel.
+    //   * disconnect task    — awaits `server_disconnect`; if intentional, pushes
+    //                          `EndedByPeer` then drops its tx clone.
+    //   * main read loop     — sequential `while let Some(msg) = read_enc_message`;
+    //                          replies like Pong / ReturnToSender go through the
+    //                          same channel.
+    //
+    // This replaces the previous single `tokio::select!` that mixed
+    // `read_enc_message` (NOT cancel-safe — reads a 4-byte length then a body)
+    // with an `active_window_tick` branch. Every time the 1 Hz tick fired
+    // while the read was mid-frame, the read future was dropped — losing any
+    // bytes already consumed — and the next message decrypt corrupted and
+    // silently closed the stream. That was the v0.2.7 "Connection from X with
+    // no follow-up log" black hole.
+    let (reader, writer) = stream.into_split();
+    let mut reader = reader;
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Message>(256);
+
+    // Writer task: owns the write half + encryption. A single consumer of the
+    // channel means no lock contention and strict message ordering.
+    let state_writer = state.clone();
+    let mut writer_task = {
+        let mut writer = writer;
+        let mut send_enc = send_enc;
+        tokio::spawn(async move {
+            while let Some(msg) = write_rx.recv().await {
+                if let Ok(data) = serde_json::to_vec(&msg) {
+                    state_writer.add_bytes_sent(data.len() as u64 + 32);
+                }
+                if !send_enc_message(&mut writer, &msg, &mut send_enc).await {
+                    break;
+                }
+            }
+        })
+    };
+
+    // Idle watchdog: samples last_activity every 5s and signals disconnect
     // once no activity has been observed for 60s.
     let watchdog_state = state.clone();
     let watchdog_disconnect = state.server_disconnect.clone();
@@ -408,21 +467,54 @@ pub async fn handle_controller(
         }
     });
 
-    // Single-threaded read loop. Cancel-safe branches only:
-    //   * `server_disconnect.notified()` — Notify is cancel-safe.
-    //   * `active_window_tick.tick()` — tokio::time::Interval is cancel-safe.
-    //   * `read_enc_message(...)` — NOT cancel-safe, so it must be the branch
-    //     that actually makes progress on a message. The outer loop only picks
-    //     ONE arm per iteration; if the interval fires, we handle it and
-    //     re-enter the select (the pending read is not yet started).
-    //
-    // The active-window poll runs on the controlled (receiver) side so the
-    // controller can display what app the remote cursor is acting on. We poll
-    // at 1 Hz only while `is_controlled` is true; idle sessions cost nothing.
+    // Active-window broadcaster: polls 1 Hz, pushes ActiveWindow via the
+    // write channel. Never touches the socket directly, so no cancel-safety
+    // concerns.
+    let active_window_state = state.clone();
+    let active_window_tx = write_tx.clone();
+    let active_window_task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last: Option<String> = None;
+        loop {
+            tick.tick().await;
+            if !active_window_state.is_controlled() {
+                if last.is_some() { last = None; }
+                continue;
+            }
+            let current = tokio::task::spawn_blocking(active_window::current_app)
+                .await
+                .ok()
+                .flatten();
+            if current != last {
+                if let Some(ref name) = current {
+                    if active_window_tx
+                        .send(Message::ActiveWindow { app_name: name.clone() })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                last = current;
+            }
+        }
+    });
+
+    // Disconnect-listener: awaits the local-side disconnect signal and
+    // politely tells the peer before the stream tears down.
+    let disconnect_state = state.clone();
     let disconnect_signal = state.server_disconnect.clone();
-    let mut active_window_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
-    active_window_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut last_active_window: Option<String> = None;
+    let disconnect_tx = write_tx.clone();
+    let disconnect_task = tokio::spawn(async move {
+        disconnect_signal.notified().await;
+        if disconnect_state.was_intentional_disconnect() {
+            let _ = disconnect_tx.send(Message::EndedByPeer).await;
+        }
+        // Dropping our tx clone lets the writer task finish draining any
+        // in-flight replies before the channel closes.
+    });
+
     // Entry edge of the current controlled session (detected from the first
     // MouseMove after FocusAcquired). When the injected cursor reaches this
     // same edge again, we treat it as the user pushing back across and send
@@ -442,49 +534,21 @@ pub async fn handle_controller(
     let departed_threshold: f64 = 60.0;
     let mut departed = false;
     loop {
+        // Sequential read — cancel-safety is no longer a concern because the
+        // read is never cancelled by a sibling branch. The disconnect-listener
+        // task independently closes the stream by dropping its write-tx clone
+        // after pushing EndedByPeer; the peer then closes which gives us EOF.
+        //
+        // We still select against disconnect_task.is_finished() to break
+        // promptly when EndedByPeer has been enqueued — otherwise we'd wait
+        // for the peer's TCP teardown to arrive, which on a dead router can
+        // take tens of seconds.
         let msg = tokio::select! {
-            biased;
-            _ = disconnect_signal.notified() => {
+            r = read_enc_message(&mut reader, &mut recv_enc) => r,
+            _ = wait_task(&disconnect_task) => {
                 tracing::info!("Disconnect signaled — closing session from {}", peer_addr);
-                // If the LOCAL user ended the session (not just a takeback),
-                // tell the connected peer so its auto-reconnect doesn't kick
-                // in and re-establish the session we just ended.
-                if state.was_intentional_disconnect() {
-                    send_enc_message(&mut stream, &Message::EndedByPeer, &mut send_enc).await;
-                }
                 break;
             }
-            _ = active_window_tick.tick() => {
-                if state.is_controlled() {
-                    // `current_app()` shells out to xdotool on Linux, so it
-                    // must go through spawn_blocking or it would stall the
-                    // runtime. macOS/Windows paths are fast but we use the
-                    // same path for uniformity.
-                    let current = tokio::task::spawn_blocking(active_window::current_app)
-                        .await
-                        .ok()
-                        .flatten();
-                    if current != last_active_window {
-                        if let Some(ref name) = current {
-                            let out = Message::ActiveWindow { app_name: name.clone() };
-                            if let Ok(data) = serde_json::to_vec(&out) {
-                                state.add_bytes_sent(data.len() as u64 + 32);
-                            }
-                            if !send_enc_message(&mut stream, &out, &mut send_enc).await {
-                                break;
-                            }
-                        }
-                        last_active_window = current;
-                    }
-                } else if last_active_window.is_some() {
-                    // Session paused (user released control): forget the last
-                    // value so the next acquire re-sends even if the app is
-                    // unchanged.
-                    last_active_window = None;
-                }
-                continue;
-            }
-            r = read_enc_message(&mut stream, &mut recv_enc) => r,
         };
 
         match msg {
@@ -550,10 +614,7 @@ pub async fn handle_controller(
                                 };
                                 if at_return_edge {
                                     return_sent = true;
-                                    // If the write fails the channel is dead;
-                                    // break the read loop so cleanup runs instead
-                                    // of continuing with a half-broken session.
-                                    if !send_enc_message(&mut stream, &Message::ReturnToSender, &mut send_enc).await {
+                                    if write_tx.send(Message::ReturnToSender).await.is_err() {
                                         break;
                                     }
                                     state.set_controlled(false);
@@ -587,11 +648,7 @@ pub async fn handle_controller(
                         set_clipboard_image(&state, width, height, bytes);
                     }
                     Message::Ping { ts } => {
-                        let pong = Message::Pong { ts };
-                        if let Ok(data) = serde_json::to_vec(&pong) {
-                            state.add_bytes_sent(data.len() as u64 + 32);
-                        }
-                        if !send_enc_message(&mut stream, &pong, &mut send_enc).await {
+                        if write_tx.send(Message::Pong { ts }).await.is_err() {
                             break;
                         }
                     }
@@ -606,8 +663,34 @@ pub async fn handle_controller(
         }
     }
 
+    // Tear down helper tasks. Drop the main write_tx so the writer task
+    // sees an empty channel and exits once its queue is drained.
+    drop(write_tx);
     watchdog.abort();
+    active_window_task.abort();
+    // disconnect_task may already have finished; if still pending (we exited
+    // via read EOF), abort it so it doesn't hold the write_tx clone alive.
+    disconnect_task.abort();
+    // Give the writer a brief moment to flush any queued replies (Bye ack,
+    // EndedByPeer) before we tear the connection down.
+    let _ = tokio::time::timeout(
+        tokio::time::Duration::from_millis(200),
+        &mut writer_task,
+    ).await;
+    writer_task.abort();
     cleanup(&app, &state, &peer_id, &peer_name, &peer_ip).await;
+}
+
+/// Small helper: await a JoinHandle without taking it by value so we can
+/// still abort it afterward. Resolves whenever the task finishes (either the
+/// disconnect-signal fired and the listener returned, or it was aborted).
+async fn wait_task<T>(handle: &tokio::task::JoinHandle<T>) {
+    let mut poll_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
+    poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        poll_tick.tick().await;
+        if handle.is_finished() { break; }
+    }
 }
 
 fn generate_session_key() -> String {

@@ -151,10 +151,25 @@ pub async fn connect_stream(
 
     // Send our own screen size so the server can scale incoming mouse coordinates
     // to its local coordinate space (fixes cursor-jump on mixed-DPI setups).
-    let (cw, ch) = rdev::display_size().unwrap_or((1920, 1080));
+    // Prefer virtual-desktop bounds so a multi-monitor controller's far edges
+    // are reachable on the peer — primary-only would clamp to the first
+    // monitor's width/height.
+    let (bx0, by0, bx1, by1) = {
+        let monitors = state.monitors.read().clone();
+        crate::screen::layout::virtual_bounds(&monitors)
+    };
+    let (cw, ch) = if bx1 > bx0 && by1 > by0 {
+        (bx1 - bx0, by1 - by0)
+    } else {
+        let (pw, ph) = rdev::display_size().unwrap_or_else(|e| {
+            tracing::warn!("rdev::display_size failed ({:?}), falling back to 1920x1080", e);
+            (1920, 1080)
+        });
+        (pw as f64, ph as f64)
+    };
     send_enc_message(
         &mut stream,
-        &Message::ScreenSize { width: cw as f64, height: ch as f64 },
+        &Message::ScreenSize { width: cw, height: ch },
         &mut send_enc,
     )
     .await;

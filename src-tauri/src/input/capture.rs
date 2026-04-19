@@ -443,11 +443,16 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
                 // move. Fix #2, #4, #5 reported in v0.2.6 testing.
                 let dx = x - lx;
                 let dy = y - ly;
-                let (lw, lh) = rdev::display_size()
-                    .map(|(w, h)| (w as f64, h as f64))
-                    .unwrap_or((1920.0, 1080.0));
+                // Prefer the full virtual desktop bounds (all monitors) over
+                // rdev::display_size() which only reports the primary. On a
+                // multi-monitor setup this matches what compute_entry_point
+                // uses on the edge side, so the dx/dy scaling and the entry
+                // edge math stay in the same coordinate frame.
+                let monitors = state.monitors.read().clone();
+                let (bx0, by0, bx1, by1) = layout::virtual_bounds(&monitors);
+                let (lw, lh) = ((bx1 - bx0).max(1.0), (by1 - by0).max(1.0));
                 let (sx, sy) = if let Some((rw, rh)) = remote {
-                    (rw / lw.max(1.0), rh / lh.max(1.0))
+                    (rw / lw, rh / lh)
                 } else {
                     (1.0, 1.0)
                 };
