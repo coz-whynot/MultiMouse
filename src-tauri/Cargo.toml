@@ -75,4 +75,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_System_LibraryLoader",
+    # Required for RegisterClassW + WNDCLASSW on windows-0.58 (WNDCLASSW
+    # contains HICON/HCURSOR/HBRUSH fields that live in Graphics_Gdi).
+    "Win32_Graphics_Gdi",
 ] }

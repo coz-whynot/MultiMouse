@@ -48,13 +48,20 @@ use windows::Win32::UI::Input::{
     HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RID_INPUT, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEMOUSE,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_MOVE_RELATIVE;
+// winuser.h: MOUSE_MOVE_RELATIVE = 0x00, MOUSE_MOVE_ABSOLUTE = 0x01.
+// Not exported as typed constants in windows-0.58, so we inline the
+// value. Semantically the check is "absolute flag not set → relative."
+const MOUSE_MOVE_ABSOLUTE_FLAG: u16 = 0x0001;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     PostMessageW, RegisterClassW, ShowCursor, TranslateMessage, UnregisterClassW,
     CW_USEDEFAULT, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_QUIT,
     WNDCLASSW,
 };
+// windows-0.58: HWND / HRAWINPUT wrap `*mut c_void`, NOT `isize`. Use
+// these helpers to round-trip through atomics (which only store isize).
+#[inline]
+fn null_hwnd() -> HWND { HWND(std::ptr::null_mut()) }
 
 use crate::network::protocol::{InputEvent, NetCommand};
 use crate::screen::layout;
@@ -91,15 +98,16 @@ static HIDE_CURSOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LAST_ABS_X: AtomicIsize = AtomicIsize::new(i32::MIN as isize);
 static LAST_ABS_Y: AtomicIsize = AtomicIsize::new(i32::MIN as isize);
 
-/// User data pointer passed to the window's WNDPROC via `lpCreateParams`.
-/// Boxed Arc<AppState>. Reclaimed when the thread exits.
-static USER_CTX: Mutex<Option<*mut Arc<AppState>>> = Mutex::new(None);
-// The pointer is only dereferenced on the Raw-Input thread and only while
-// ACTIVE is true. Marking the Mutex's inner pointer Send/Sync is sound
-// under that usage contract.
-unsafe impl Send for UserCtxSend {}
-unsafe impl Sync for UserCtxSend {}
-struct UserCtxSend;
+/// User data passed to the window's WNDPROC. Boxed `Arc<AppState>` behind
+/// a newtype so we can safely put it in a `static Mutex` — raw pointers
+/// aren't Send/Sync by default. The pointer is only dereferenced on the
+/// Raw-Input thread and only while `ACTIVE` is true; other threads only
+/// set/take the Option, which is an `isize`-level operation. Reclaimed
+/// as a `Box<Arc<AppState>>` when the thread exits.
+struct UserCtxPtr(*mut Arc<AppState>);
+unsafe impl Send for UserCtxPtr {}
+unsafe impl Sync for UserCtxPtr {}
+static USER_CTX: Mutex<Option<UserCtxPtr>> = Mutex::new(None);
 
 /// RAII guard stored in `AppState.relay_guard`. Mirrors `raw_mouse_mac::RelayGuard`
 /// so `state.rs` can use a single `crate::input::RelayGuard` type.
@@ -145,10 +153,11 @@ pub fn deactivate() {
     }
     // Post WM_QUIT to the hidden window's thread so its GetMessage loop
     // exits. The thread itself handles DestroyWindow/UnregisterClass.
-    let hwnd = HWND_RAW.swap(0, Ordering::AcqRel);
-    if hwnd != 0 {
+    let hwnd_isize = HWND_RAW.swap(0, Ordering::AcqRel);
+    if hwnd_isize != 0 {
         unsafe {
-            let _ = PostMessageW(HWND(hwnd), WM_QUIT, WPARAM(0), LPARAM(0));
+            let hwnd = HWND(hwnd_isize as *mut _);
+            let _ = PostMessageW(hwnd, WM_QUIT, WPARAM(0), LPARAM(0));
         }
     }
     if HIDE_CURSOR_ACTIVE.swap(false, Ordering::AcqRel) {
@@ -172,7 +181,7 @@ fn run_raw_input_thread(state: Arc<AppState>) {
     // the message loop exits. Safe because the thread outlives any
     // callback invocation.
     let ctx_ptr = Box::into_raw(Box::new(state));
-    *USER_CTX.lock() = Some(ctx_ptr);
+    *USER_CTX.lock() = Some(UserCtxPtr(ctx_ptr));
 
     unsafe {
         let hinstance = match GetModuleHandleW(PCWSTR::null()) {
@@ -208,7 +217,7 @@ fn run_raw_input_thread(state: Arc<AppState>) {
             None,
         );
         let hwnd = match hwnd {
-            Ok(h) if h.0 != 0 => h,
+            Ok(h) if !h.0.is_null() => h,
             _ => {
                 tracing::warn!("[raw_mouse_win] CreateWindowExW failed");
                 let _ = UnregisterClassW(PCWSTR(CLASS_NAME.as_ptr()), hinstance);
@@ -217,7 +226,7 @@ fn run_raw_input_thread(state: Arc<AppState>) {
                 return;
             }
         };
-        HWND_RAW.store(hwnd.0, Ordering::Release);
+        HWND_RAW.store(hwnd.0 as isize, Ordering::Release);
 
         // Register generic mouse usage page/usage. RIDEV_INPUTSINK makes
         // WM_INPUT deliveries arrive even when our hidden window isn't
@@ -242,7 +251,7 @@ fn run_raw_input_thread(state: Arc<AppState>) {
         // Pump messages until WM_QUIT (posted by deactivate()).
         let mut msg = MSG::default();
         loop {
-            let r = GetMessageW(&mut msg, HWND(0), 0, 0).0;
+            let r = GetMessageW(&mut msg, null_hwnd(), 0, 0).0;
             if r <= 0 {
                 // 0 = WM_QUIT, -1 = error. Either way, exit the loop.
                 break;
@@ -256,7 +265,7 @@ fn run_raw_input_thread(state: Arc<AppState>) {
             usUsagePage: 0x01,
             usUsage: 0x02,
             dwFlags: RIDEV_REMOVE,
-            hwndTarget: HWND(0),
+            hwndTarget: null_hwnd(),
         };
         let _ = RegisterRawInputDevices(&[rid_remove], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
         let _ = DestroyWindow(hwnd);
@@ -268,7 +277,7 @@ fn run_raw_input_thread(state: Arc<AppState>) {
 }
 
 fn cleanup_user_ctx() {
-    if let Some(ptr) = USER_CTX.lock().take() {
+    if let Some(UserCtxPtr(ptr)) = USER_CTX.lock().take() {
         unsafe { let _ = Box::from_raw(ptr); }
     }
 }
@@ -288,7 +297,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
 
 unsafe fn handle_raw_input(lparam: LPARAM) {
     // Grab the AppState pointer. Without a valid ctx we can't ship.
-    let ctx_ptr = match *USER_CTX.lock() { Some(p) => p, None => return };
+    let ctx_ptr = match USER_CTX.lock().as_ref().map(|u| u.0) {
+        Some(p) => p,
+        None => return,
+    };
     let state = &*ctx_ptr;
 
     // Cheap insurance: don't ship unless the relay is actually active.
@@ -296,7 +308,7 @@ unsafe fn handle_raw_input(lparam: LPARAM) {
         return;
     }
 
-    let hraw = HRAWINPUT(lparam.0 as isize);
+    let hraw = HRAWINPUT(lparam.0 as *mut _);
     let mut ri = RAWINPUT::default();
     let mut size = std::mem::size_of::<RAWINPUT>() as u32;
     let header_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
@@ -315,11 +327,11 @@ unsafe fn handle_raw_input(lparam: LPARAM) {
         return;
     }
     let mouse = &ri.data.mouse;
-    // `MOUSE_MOVE_RELATIVE` is the default flag for most hardware mice.
-    // When it's set, `lLastX/lLastY` are signed HID deltas. When it's
-    // NOT set (absolute-mode sources like RDP / Hyper-V / tablets),
-    // compute a delta from the previous absolute value.
-    let is_relative = (mouse.usFlags.0 & MOUSE_MOVE_RELATIVE.0) != 0;
+    // Most hardware mice report with the ABSOLUTE flag UNSET (value 0x00)
+    // and `lLastX/lLastY` are signed HID deltas. RDP / Hyper-V / tablets
+    // set the ABSOLUTE flag — in that case `lLast*` are normalized 0..65535
+    // virtual-desktop coords, and we derive deltas from the prior absolute.
+    let is_relative = (mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE_FLAG) == 0;
     let (dx, dy) = if is_relative {
         (mouse.lLastX, mouse.lLastY)
     } else {

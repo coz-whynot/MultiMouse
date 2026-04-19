@@ -97,12 +97,13 @@ fn is_fullscreen_foreground() -> bool {
         SHQueryUserNotificationState,
         QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE,
     };
+    // windows-0.58 style: returns the state directly in a Result; no
+    // out-param pointer.
     unsafe {
-        let mut state = Default::default();
-        if SHQueryUserNotificationState(&mut state).is_err() {
-            return false;
+        match SHQueryUserNotificationState() {
+            Ok(state) => state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE,
+            Err(_) => false,
         }
-        state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE
     }
 }
 
