@@ -222,7 +222,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                     // forwarded to us and injected, and the grab sees it too.
                     // Without this filter the receiver treats it as a local
                     // "kick" and the session bounces into cooldown.
-                    if !inject::recently_injected(150) {
+                    if !inject::recently_injected(300) {
                         tracing::info!("Receiver pressed Escape — signaling disconnect");
                         true
                     } else {
@@ -232,7 +232,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                 EventType::KeyPress(_) | EventType::ButtonPress(_) => {
                     // Distinguish native user input from our own echoed injection:
                     // if we injected in the last 150ms this is probably the echo.
-                    if !inject::recently_injected(150) {
+                    if !inject::recently_injected(300) {
                         tracing::info!("Receiver native input detected ({:?}) — releasing session", event.event_type);
                         true
                     } else {
@@ -273,7 +273,7 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
             // Don't arm edge-activation on those — it caused a feedback
             // "rubber band" where injected moves at the edge would trigger
             // our own relay-start and pull control back mid-move.
-            let is_echo = state.is_controlled() || inject::recently_injected(150);
+            let is_echo = state.is_controlled() || inject::recently_injected(300);
             // Block re-activation for a short window after a release.
             let recently_released = state
                 .last_release

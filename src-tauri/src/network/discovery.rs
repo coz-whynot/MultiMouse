@@ -74,10 +74,28 @@ pub async fn start_discovery(app: AppHandle, state: Arc<AppState>) {
                     .get_property_val_str("av")
                     .map(|s| s.to_string());
 
+                // Prefer IPv4 over IPv6. IPv6 link-local (fe80::/10) returned
+                // by mDNS requires a scope-id that a raw TcpStream::connect
+                // can't resolve, so Mac → Windows attempts on IPv6 fail with
+                // "No route to host" until they time out. We always have a
+                // global IPv4 on the LAN for real peers, so skip loopback and
+                // link-local addresses entirely.
                 let addr = info
                     .get_addresses()
                     .iter()
+                    .filter(|a| match a {
+                        std::net::IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local(),
+                        std::net::IpAddr::V6(_) => false,
+                    })
                     .next()
+                    .or_else(|| {
+                        // Fall back to any non-loopback v6 if no v4 exists.
+                        info.get_addresses().iter().find(|a| match a {
+                            std::net::IpAddr::V6(v6) => !v6.is_loopback()
+                                && !(v6.segments()[0] & 0xffc0 == 0xfe80),
+                            _ => false,
+                        })
+                    })
                     .map(|a| a.to_string())
                     .unwrap_or_default();
 

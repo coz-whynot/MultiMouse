@@ -183,6 +183,12 @@ pub fn inject_text(text: String) {
 
 
 fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
+    // Stamp before the enigo call (same reason as `inject`): the synthetic
+    // event can be observed by rdev during the call, so the timestamp has
+    // to be in place before the syscall lands.
+    if !matches!(cmd, InjectCmd::Remote(_)) {
+        mark_injected();
+    }
     match cmd {
         InjectCmd::Remote(event) => inject(enigo, event),
         InjectCmd::MoveRel { dx, dy } => {
@@ -214,10 +220,18 @@ fn inject_cmd(enigo: &mut Enigo, cmd: InjectCmd) {
             let _ = enigo.text(&text);
         }
     }
-    mark_injected();
+    // NOTE: mark_injected is now called *before* each enigo call at the
+    // top of the match arms (inside `inject`), not at the end. The receiver's
+    // rdev callback can fire synchronously during the enigo call — if we
+    // marked AFTER, the receiver's `recently_injected()` check would see a
+    // stale timestamp and misclassify the injected echo as local user input.
 }
 
 fn inject(enigo: &mut Enigo, event: InputEvent) {
+    // Stamp BEFORE the enigo call so the receiver's capture thread —
+    // which may observe the synthetic event synchronously from the OS
+    // event tap during the call — always reads a fresh LAST_INJECT_MS.
+    mark_injected();
     match event {
         InputEvent::MouseMove { x, y } => {
             // Wire coords are LOGICAL pixels. enigo on macOS uses

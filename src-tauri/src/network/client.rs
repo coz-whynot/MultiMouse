@@ -16,6 +16,35 @@ fn reset_peer_status(state: &AppState, peer_id: &str) {
     }
 }
 
+/// True if `addr` looks routable on the LAN — i.e., not empty, not loopback,
+/// not IPv6 link-local. Link-local needs a scope-id we don't carry on the
+/// protocol, so `TcpStream::connect` on fe80:: dies EHOSTUNREACH.
+fn is_usable_addr(addr: &str) -> bool {
+    if addr.is_empty() { return false; }
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => !v4.is_loopback() && !v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            !v6.is_loopback() && (v6.segments()[0] & 0xffc0 != 0xfe80)
+        }
+        Err(_) => {
+            // Accept hostnames verbatim — the OS resolver will handle them.
+            // We only fail the sentinel cases above that we can detect locally.
+            true
+        }
+    }
+}
+
+/// Clear a known-bad peer address so the next connect attempt short-circuits
+/// via `is_usable_addr` and waits for a fresh mDNS resolve to fill in a
+/// working IP. Without this, reconnect_with_backoff retries the same dead
+/// address five times before giving up.
+fn invalidate_peer_addr(state: &AppState, peer_id: &str) {
+    let mut peers = state.peers.lock();
+    if let Some(p) = peers.iter_mut().find(|p| p.id == peer_id) {
+        p.addr.clear();
+    }
+}
+
 pub async fn connect(
     app: AppHandle,
     state: Arc<AppState>,
@@ -23,6 +52,31 @@ pub async fn connect(
     pin: String,
     session_key: Option<String>,
 ) {
+    // Reject link-local / loopback / empty at connect time too. Even with
+    // the discovery filter, an existing `state.peers` entry resolved before
+    // the filter shipped can still carry a stale fe80:: address;
+    // TcpStream::connect on that dies with EHOSTUNREACH until a new
+    // ServiceResolved event rewrites it. Clear the stale value so the
+    // caller waits for a fresh resolve instead of hammering the dead IP
+    // five times through reconnect_with_backoff.
+    if !is_usable_addr(&peer.addr) {
+        tracing::warn!(
+            "Skipping connect to {} — address '{}' is empty/link-local/loopback; \
+             waiting for a fresh mDNS resolve",
+            peer.id, peer.addr
+        );
+        invalidate_peer_addr(&state, &peer.id);
+        reset_peer_status(&state, &peer.id);
+        let _ = app.emit(
+            "connection-failed",
+            serde_json::json!({
+                "peer_id": peer.id,
+                "error": "Peer address unresolved; retry after discovery re-announces",
+            }),
+        );
+        return;
+    }
+
     let addr = format!("{}:{}", peer.addr, peer.port);
     let stream = match tokio::time::timeout(
         tokio::time::Duration::from_secs(10),
@@ -31,6 +85,17 @@ pub async fn connect(
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             tracing::error!("Connect to {} failed: {}", addr, e);
+            // The address we have is no good right now. Clear it so the next
+            // reconnect attempt skips until mDNS re-announces (see
+            // `is_usable_addr` guard above) rather than retrying the same
+            // dead IP five times with exponential backoff.
+            if matches!(e.kind(),
+                std::io::ErrorKind::HostUnreachable
+                | std::io::ErrorKind::NetworkUnreachable
+                | std::io::ErrorKind::AddrNotAvailable
+            ) {
+                invalidate_peer_addr(&state, &peer.id);
+            }
             reset_peer_status(&state, &peer.id);
             let _ = app.emit(
                 "connection-failed",
@@ -372,7 +437,30 @@ fn reconnect_with_backoff(
             if state.was_intentional_disconnect() { return; }
             if state.connected_peer.lock().is_some() { return; }
 
-            tracing::info!("Auto-reconnect attempt {} to {}", i + 1, peer.name);
+            // Re-read the peer address from state.peers each iteration
+            // rather than capturing it once. A failed connect may have
+            // invalidated peer.addr (see `invalidate_peer_addr`); the next
+            // iteration must pick up any fresh IP that mDNS resolved since.
+            let current = state
+                .peers
+                .lock()
+                .iter()
+                .find(|p| p.id == peer.id)
+                .cloned();
+            let Some(current) = current else {
+                tracing::warn!("Auto-reconnect: peer {} no longer in peer list — aborting", peer.id);
+                return;
+            };
+            if !is_usable_addr(&current.addr) {
+                tracing::info!(
+                    "Auto-reconnect attempt {}: peer {} has no usable address yet \
+                     (waiting on mDNS re-resolve)",
+                    i + 1, peer.name
+                );
+                continue;
+            }
+
+            tracing::info!("Auto-reconnect attempt {} to {} at {}", i + 1, peer.name, current.addr);
             let _ = app.emit(
                 "reconnect-attempt",
                 serde_json::json!({
@@ -382,19 +470,33 @@ fn reconnect_with_backoff(
                 }),
             );
 
-            let addr = format!("{}:{}", peer.addr, peer.port);
+            let addr = format!("{}:{}", current.addr, current.port);
             let stream = match tokio::time::timeout(
                 tokio::time::Duration::from_secs(5),
                 TcpStream::connect(&addr),
             ).await {
                 Ok(Ok(s)) => s,
-                _ => continue,
+                Ok(Err(e)) => {
+                    tracing::warn!("Auto-reconnect connect to {} failed: {}", addr, e);
+                    if matches!(e.kind(),
+                        std::io::ErrorKind::HostUnreachable
+                        | std::io::ErrorKind::NetworkUnreachable
+                        | std::io::ErrorKind::AddrNotAvailable
+                    ) {
+                        invalidate_peer_addr(&state, &peer.id);
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!("Auto-reconnect to {} timed out", addr);
+                    continue;
+                }
             };
             connect_stream(
                 app.clone(),
                 state.clone(),
                 stream,
-                peer.clone(),
+                current.clone(),
                 String::new(),
                 session_key.clone(),
             ).await;

@@ -326,6 +326,25 @@ pub async fn handle_controller(
         let mut peers = state.peers.lock();
         if let Some(p) = peers.iter_mut().find(|p| p.id == peer_id) {
             p.status = PeerStatus::Connected;
+            // Backfill the peer entry with the IP that just successfully
+            // completed a TCP connection to us. mDNS may have previously
+            // recorded an fe80:: link-local that this peer can't route back
+            // on reconnect; replacing with the proven-reachable IP fixes
+            // outbound reconnects in our direction too.
+            if !peer_ip.is_empty()
+                && !peer_ip.starts_with("fe80:")
+                && peer_ip != "0.0.0.0"
+                && peer_ip != "127.0.0.1"
+                && peer_ip != "::1"
+            {
+                if p.addr != peer_ip {
+                    tracing::info!(
+                        "Backfilling peer {} addr: {:?} → {}",
+                        peer_id, p.addr, peer_ip
+                    );
+                    p.addr = peer_ip.clone();
+                }
+            }
         }
     }
     // Swap the PENDING_MARKER for the real peer id. If someone else somehow
