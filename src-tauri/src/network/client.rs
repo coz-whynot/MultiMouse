@@ -392,6 +392,19 @@ pub async fn connect_stream(
         }
     }
 
+    // Phase 6 — release burst. If we were holding any modifiers when
+    // the session ended, send synthetic KeyReleases before the socket
+    // closes. Only works on graceful end (net_tx still alive); if the
+    // TCP stream already died we can't reach the peer, and the peer
+    // handles that case via its own receiver-side local release burst
+    // in `server.rs`.
+    let held: Vec<String> = state.held_modifiers.lock().drain().collect();
+    for key in held {
+        state.send_net(NetCommand::Input(
+            crate::network::protocol::InputEvent::Key { key, pressed: false },
+        ));
+    }
+
     // Stop the ping task so it doesn't outlive the session.
     ping_task.abort();
 

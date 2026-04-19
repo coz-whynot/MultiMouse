@@ -60,14 +60,7 @@ fn physical_to_inject_xy(x: f64, y: f64, state: &AppState) -> (f64, f64) {
     }
     #[cfg(target_os = "macos")]
     {
-        let sf = state
-            .monitors
-            .read()
-            .iter()
-            .find(|m| m.is_primary)
-            .map(|m| m.scale_factor)
-            .unwrap_or(1.0)
-            .max(1e-6);
+        let sf = primary_sf(state);
         (x / sf, y / sf)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -75,6 +68,43 @@ fn physical_to_inject_xy(x: f64, y: f64, state: &AppState) -> (f64, f64) {
         let _ = state;
         (x, y)
     }
+}
+
+/// Same platform shape as `physical_to_inject_xy` but for RELATIVE deltas
+/// (v6 streaming path). On macOS, enigo's `Coordinate::Rel` path posts a
+/// CGEvent with `deltaX`/`deltaY` in logical points — so we divide the
+/// incoming physical delta by the primary backing scale factor. On Windows
+/// / Linux, enigo Rel expects physical px — pass-through.
+#[inline]
+fn physical_to_delta_inject_xy(dx: f64, dy: f64, state: &AppState) -> (f64, f64) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = state;
+        (dx, dy)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let sf = primary_sf(state);
+        (dx / sf, dy / sf)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = state;
+        (dx, dy)
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[inline]
+fn primary_sf(state: &AppState) -> f64 {
+    state
+        .monitors
+        .read()
+        .iter()
+        .find(|m| m.is_primary)
+        .map(|m| m.scale_factor)
+        .unwrap_or(1.0)
+        .max(1e-6)
 }
 
 fn mark_injected() {
@@ -250,6 +280,16 @@ fn inject(enigo: &mut Enigo, event: InputEvent, state: &AppState) {
             // Convert to the unit enigo expects on this platform.
             let (fx, fy) = physical_to_inject_xy(x, y, state);
             let _ = enigo.move_mouse(fx as i32, fy as i32, Coordinate::Abs);
+        }
+        InputEvent::MouseMoveRel { dx, dy } => {
+            // v6 streaming-relative path. Incoming deltas are in
+            // receiver-physical units (sender applied the remote/local
+            // scale). On macOS, enigo's Rel path posts a CGEvent whose
+            // deltaX/deltaY fields are in logical points, so we divide by
+            // the primary backingScaleFactor at the OS boundary. Windows
+            // and Linux: physical-px pass-through.
+            let (ldx, ldy) = physical_to_delta_inject_xy(dx, dy, state);
+            let _ = enigo.move_mouse(ldx as i32, ldy as i32, Coordinate::Rel);
         }
         InputEvent::MouseButton { button, pressed } => {
             let btn = match button {

@@ -79,6 +79,104 @@ fn is_single_key_release(hotkey: &str) -> bool {
     matches!(hotkey, "caps_lock")
 }
 
+/// Parse a key-name string (e.g. `"F13"`, `"ScrollLock"`) into the matching
+/// `rdev::Key`. Returns None for empty or unknown names. Kept intentionally
+/// narrow — only keys a user would bind as a "switch control" hotkey. The
+/// full rdev Key enum is large and most variants aren't useful here (letters
+/// would conflict with normal typing, for example).
+fn parse_switch_hotkey_name(name: &str) -> Option<rdev::Key> {
+    use rdev::Key as K;
+    Some(match name.trim() {
+        "F1"  => K::F1,  "F2"  => K::F2,  "F3"  => K::F3,  "F4"  => K::F4,
+        "F5"  => K::F5,  "F6"  => K::F6,  "F7"  => K::F7,  "F8"  => K::F8,
+        "F9"  => K::F9,  "F10" => K::F10, "F11" => K::F11, "F12" => K::F12,
+        // Rare extended function keys, often present on full keyboards.
+        "ScrollLock" | "Scroll_Lock" => {
+            // rdev exposes Key::ScrollLock only on non-mac Unix; fall back
+            // to a platform-agnostic detectable alternative by returning
+            // None on macOS. macOS users should bind an F-key instead.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            { K::ScrollLock }
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            { return None }
+        }
+        _ => return None,
+    })
+}
+
+/// If `event` is a `KeyPress` matching one of the user's configured
+/// switch hotkeys AND gaming_mode is currently on, toggle which machine
+/// has the mouse and return true (caller consumes the event). Returns
+/// false otherwise — event flows through normal handling.
+///
+/// Takes `state: &Arc<AppState>` rather than `&AppState` so we can clone
+/// an Arc for the platform `RelayGuard` when activating.
+fn try_handle_switch_hotkey(event: &Event, state: &Arc<AppState>, app: &AppHandle) -> bool {
+    let EventType::KeyPress(pressed) = &event.event_type else { return false };
+    let settings = state.settings.read();
+    // Hotkey is a no-op outside gaming mode. Normal edge-cross handles the
+    // "mouse follows cursor" flow when gaming mode is off.
+    if !settings.gaming_mode {
+        return false;
+    }
+    // Honour at most 9 configured bindings; silently ignore the rest to
+    // keep the hot path bounded.
+    let bindings = settings.switch_hotkeys.iter().take(9).cloned().collect::<Vec<_>>();
+    drop(settings);
+    let matched = bindings
+        .iter()
+        .filter_map(|name| parse_switch_hotkey_name(name))
+        .any(|k| &k == pressed);
+    if !matched {
+        return false;
+    }
+
+    // Toggle: if we're currently relaying, release; otherwise try to
+    // activate. Activation requires an established peer connection.
+    if state.is_relaying() {
+        state.set_relaying(false);
+        *state.relay_entry.lock() = None;
+        state.send_net(NetCommand::FocusReleased);
+        sync_clipboard_async(state);
+        *state.last_release.lock() = Some(Instant::now());
+        let _ = app.emit("focus-released", ());
+        tracing::info!("Relay released via switch hotkey ({:?})", pressed);
+    } else {
+        if state.net_tx.lock().is_none() || state.connected_peer.lock().is_none() {
+            // No peer to switch to — ignore rather than surprising the user.
+            tracing::debug!("Switch hotkey pressed but no peer connected; ignoring");
+            return true;
+        }
+        // Synthetic activation: pretend the cursor is at the transition
+        // edge so compute_entry_point produces the right remote coords.
+        let edge = state.settings.read().transition_edge.clone();
+        let monitors = state.monitors.read().clone();
+        let (bx0, by0, bx1, by1) = layout::virtual_bounds(&monitors);
+        let (fake_x, fake_y) = match edge.as_str() {
+            "left"   => (bx0, (by0 + by1) / 2.0),
+            "top"    => ((bx0 + bx1) / 2.0, by0),
+            "bottom" => ((bx0 + bx1) / 2.0, by1 - 1.0),
+            _        => (bx1 - 1.0, (by0 + by1) / 2.0), // right default
+        };
+        let (entry_x, entry_y) = compute_entry_point(fake_x, fake_y, &edge, &monitors, state);
+        let _ = (fake_x, fake_y); // anchor no longer stored on state
+        *state.relay_entry.lock() = Some((entry_x, entry_y));
+        state.set_relaying(true);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            *state.relay_guard.lock() = Some(
+                crate::input::RelayGuard::activate(state.clone())
+            );
+        }
+        state.send_net(NetCommand::Input(InputEvent::MouseMove { x: entry_x, y: entry_y }));
+        state.send_net(NetCommand::FocusAcquired);
+        sync_clipboard_async(state);
+        let _ = app.emit("focus-acquired", ());
+        tracing::info!("Relay activated via switch hotkey ({:?})", pressed);
+    }
+    true
+}
+
 /// Pause/Break toggles gaming mode (edge-cross disabled). Returns true if the
 /// event was the toggle and should be consumed. Persists the new setting on a
 /// background thread so we never block the input pipeline on disk I/O.
@@ -141,6 +239,21 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
         });
     }
 
+    // Belt-and-suspenders: if the process panics during a relay session
+    // we must undo the OS-level cursor changes, otherwise the user's
+    // cursor stays hidden (Windows) or decoupled (macOS) until reboot.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let existing = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            #[cfg(target_os = "macos")]
+            crate::input::raw_mouse_mac::deactivate();
+            #[cfg(target_os = "windows")]
+            crate::input::raw_mouse_win::deactivate();
+            existing(info);
+        }));
+    }
+
     #[cfg(target_os = "linux")]
     {
         let state_listen = state.clone();
@@ -153,10 +266,19 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
     }
 }
 
-fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event> {
+fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<Event> {
     // Global toggle: Pause/Break key flips gaming mode regardless of relay state.
     // Consumed so games don't receive it.
     if try_toggle_gaming_mode(&event, state, app) {
+        return None;
+    }
+
+    // Switch-hotkey handling (v0.3.4 Phase 4c). ONLY active when gaming_mode
+    // is on — outside gaming mode, edge-cross works freely and a hotkey
+    // would be redundant. When active: pressing any of the configured
+    // `switch_hotkeys` toggles which machine has the mouse, bypassing
+    // edge-dwell. Consumed so the game doesn't receive it.
+    if try_handle_switch_hotkey(&event, state, app) {
         return None;
     }
 
@@ -211,8 +333,38 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
             }
         }
 
-        if let Some(ev) = convert_and_remap(&event.event_type, state) {
-            state.send_net(NetCommand::Input(ev));
+        // Route motion through the platform's raw-delta path on macOS and
+        // Windows — skip forwarding MouseMove from rdev's grab. rdev's grab
+        // still fires and still returns None below (blocking legacy delivery
+        // from reaching games), but we don't ship the absolute position on
+        // the wire. The HID tap (mac) / Raw Input window (win) emits
+        // MouseMoveRel independently. Linux still uses the absolute path
+        // until we add native delta capture there.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let skip_motion = matches!(event.event_type, EventType::MouseMove { .. });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let skip_motion = false;
+
+        if !skip_motion {
+            if let Some(ev) = convert_and_remap(&event.event_type, state) {
+                // Phase 6 held-modifier bookkeeping: remember every
+                // modifier press we ship, so we can send a release burst
+                // if the session ends while the user is still holding
+                // them. `is_modifier_key_name` limits the set to
+                // Shift/Ctrl/Alt/Meta (the ones that cause visible stuck
+                // behaviour on the peer — ALL CAPS, Cmd shortcuts, etc.).
+                if let InputEvent::Key { key, pressed } = &ev {
+                    if crate::input::is_modifier_key_name(key) {
+                        let mut held = state.held_modifiers.lock();
+                        if *pressed {
+                            held.insert(key.clone());
+                        } else {
+                            held.remove(key);
+                        }
+                    }
+                }
+                state.send_net(NetCommand::Input(ev));
+            }
         }
         None
     } else {
@@ -320,24 +472,45 @@ fn handle_grab(event: Event, state: &AppState, app: &AppHandle) -> Option<Event>
                     *state.edge_first_touch.lock() = None;
                     let (entry_x, entry_y) = compute_entry_point(px, py, &edge, &monitors, state);
 
-                    // Warp the local cursor off the edge to the screen center so the OS
-                    // stops clamping subsequent mouse motion (otherwise we'd only ever
-                    // see x=edge on the next event and the delta would be zero).
-                    let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
-                    let center_x = (min_x + max_x) / 2.0;
-                    let center_y = (min_y + max_y) / 2.0;
-                    inject::warp_abs(center_x as i32, center_y as i32);
+                    // Linux only still needs the warp-to-center: its
+                    // absolute-delta fallback in `convert_and_remap` reads
+                    // cursor positions from rdev, which would otherwise
+                    // clamp at the screen edge after the activation motion.
+                    // macOS and Windows capture HID-level deltas directly,
+                    // so there's nothing to "un-stick" — skip the warp.
+                    #[cfg(target_os = "linux")]
+                    {
+                        let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
+                        let center_x = (min_x + max_x) / 2.0;
+                        let center_y = (min_y + max_y) / 2.0;
+                        inject::warp_abs(center_x as i32, center_y as i32);
+                        let _ = (center_x, center_y);
+                    }
+                    // `relay_entry` now holds only the remote entry point.
+                    // The local anchor (used on Linux's fallback path) is a
+                    // thread_local inside `convert_and_remap` that
+                    // re-seeds from the first post-activation rdev event.
+                    let _ = px; let _ = py;
+                    *state.relay_entry.lock() = Some((entry_x, entry_y));
 
-                    // Delta anchor is the CENTER (where cursor now lives after the warp),
-                    // not the edge. This keeps the delta math numerically sane.
-                    *state.relay_entry.lock() = Some((center_x, center_y, entry_x, entry_y));
                     state.set_relaying(true);
+                    // macOS: HID tap + CGAssociate(false). Windows: Raw
+                    // Input hidden window. Both expose `crate::input::RelayGuard`
+                    // so we install through a single name. Must happen
+                    // AFTER set_relaying(true) because the capture layer
+                    // short-circuits on !is_relaying as a defensive check.
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    {
+                        *state.relay_guard.lock() = Some(
+                            crate::input::RelayGuard::activate(state.clone())
+                        );
+                    }
                     // Warp remote cursor to the entry point before activating control
                     state.send_net(NetCommand::Input(InputEvent::MouseMove { x: entry_x, y: entry_y }));
                     state.send_net(NetCommand::FocusAcquired);
                     sync_clipboard_async(state);
                     let _ = app.emit("focus-acquired", ());
-                    tracing::debug!("Relay ON — cursor at {} edge ({x:.0}, {y:.0}) → warped local to center ({center_x:.0}, {center_y:.0}), remote entry ({entry_x:.0}, {entry_y:.0})", edge);
+                    tracing::debug!("Relay ON — {} edge, entry=({entry_x:.0}, {entry_y:.0})", edge);
                 }
             } else {
                 *state.edge_first_touch.lock() = None;
@@ -425,11 +598,15 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                 if should_activate {
                     *state.edge_first_touch.lock() = None;
                     let (entry_x, entry_y) = compute_entry_point(px, py, &edge, &monitors, state);
+                    // Linux listen-fallback still warps local cursor to
+                    // center so `convert_and_remap`'s absolute-delta path
+                    // has room to track motion without hitting screen edge.
                     let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(&monitors);
                     let center_x = (min_x + max_x) / 2.0;
                     let center_y = (min_y + max_y) / 2.0;
                     inject::warp_abs(center_x as i32, center_y as i32);
-                    *state.relay_entry.lock() = Some((center_x, center_y, entry_x, entry_y));
+                    let _ = (center_x, center_y);
+                    *state.relay_entry.lock() = Some((entry_x, entry_y));
                     state.set_relaying(true);
                     state.send_net(NetCommand::Input(InputEvent::MouseMove { x: entry_x, y: entry_y }));
                     state.send_net(NetCommand::FocusAcquired);
@@ -462,18 +639,32 @@ fn compute_entry_point(x: f64, y: f64, edge: &str, monitors: &[crate::state::Mon
     }
 }
 
-/// Convert an rdev event to an InputEvent for the network, applying throttling and
-/// delta-based coordinate remapping for mouse moves when in relay mode.
+/// Convert an rdev event to an InputEvent for the network, applying
+/// throttling and delta-based coordinate remapping for mouse moves when
+/// in relay mode.
 ///
-/// v5: all intermediate math runs in **sender physical virtual-desktop pixels**.
-/// `relay_entry` is stored in the same units. The receiver does the
-/// physical→physical scale on its side using `remote_screen` (which is the
-/// sender's physical dimensions we shipped via `Message::ScreenSize`).
+/// Post-v0.3.4 this function's `EventType::MouseMove` arm is **only
+/// reached on Linux**. macOS routes motion through `raw_mouse_mac` (HID
+/// tap) and Windows through `raw_mouse_win` (Raw Input); both platforms
+/// filter MouseMove out via `skip_motion` in `handle_grab` so this arm
+/// is dead code there. Non-motion events (buttons, keys, scroll) still
+/// pass through on all platforms via the fallthrough `convert_event`
+/// call.
+///
+/// All coords are in **sender physical virtual-desktop pixels** (v5+).
 fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEvent> {
     match event_type {
         EventType::MouseMove { x, y } => {
+            // Local-anchor cache. `relay_entry` now only holds the REMOTE
+            // entry point (2-tuple) — the local anchor we diff against is
+            // kept in this thread_local and re-seeded every time the
+            // remote entry changes (i.e., every new session). Wrapping the
+            // cache as `(entry_signature, local_anchor)` self-invalidates
+            // when session boundaries roll over without needing a separate
+            // reset hook.
             thread_local! {
                 static LAST_MOVE: Cell<Option<Instant>> = Cell::new(None);
+                static LOCAL_ANCHOR: Cell<Option<(f64, f64, f64, f64)>> = Cell::new(None);
             }
             let now = Instant::now();
             let should_send = LAST_MOVE.with(|last| {
@@ -486,18 +677,26 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
             });
             if !should_send { return None; }
 
-            // Normalize rdev input into sender-physical once; everything
-            // downstream (relay_entry anchor, delta math, clamp) operates in
-            // that single coordinate system.
             let (px, py) = rdev_to_physical_xy(*x, *y, state);
-
             let entry = *state.relay_entry.lock();
             let remote = *state.remote_screen.lock();
 
-            let (rx, ry) = if let Some((lx, ly, ex, ey)) = entry {
-                // All four terms (px, py, lx, ly) are sender-physical. Compute
-                // the delta, then scale to receiver-physical using remote's
-                // dimensions / our virtual-desktop physical dimensions.
+            let (rx, ry) = if let Some((ex, ey)) = entry {
+                // Re-seed the local anchor if the remote entry changed
+                // (new session). On first event post-activation this also
+                // runs and seeds to the current cursor position — meaning
+                // the first `MouseMoveRel`-equivalent delta is 0 and the
+                // remote stays at the entry point until the user moves.
+                let (lx, ly) = LOCAL_ANCHOR.with(|c| {
+                    match c.get() {
+                        Some((cached_ex, cached_ey, lx, ly))
+                            if cached_ex == ex && cached_ey == ey => (lx, ly),
+                        _ => {
+                            c.set(Some((ex, ey, px, py)));
+                            (px, py)
+                        }
+                    }
+                });
                 let dx = px - lx;
                 let dy = py - ly;
                 let monitors = state.monitors.read().clone();
@@ -516,6 +715,9 @@ fn convert_and_remap(event_type: &EventType, state: &AppState) -> Option<InputEv
                     (nx.max(0.0), ny.max(0.0))
                 }
             } else {
+                // No session active — drop the cached anchor so a future
+                // session starts clean.
+                LOCAL_ANCHOR.with(|c| c.set(None));
                 (px, py)
             };
 

@@ -6,11 +6,14 @@ use crate::crypto::encryption::Channel;
 pub const MULTIMOUSE_PORT: u16 = 57172;
 pub const TRANSFER_PORT: u16 = 57174;
 pub const MULTIMOUSE_SERVICE: &str = "_multimouse._tcp.local.";
-/// Wire protocol version. Bumped 4→5 when `InputEvent::MouseMove` and
-/// `Message::ScreenSize` switched from logical-pixel to physical-virtual-desktop
-/// coordinates. v4 peers will be cleanly rejected by the version check in
-/// `server.rs`.
-pub const PROTOCOL_VERSION: u32 = 5;
+/// Wire protocol version.
+/// - v4→v5: `InputEvent::MouseMove` and `Message::ScreenSize` became physical
+///   virtual-desktop pixels (fixed mixed-DPI multi-monitor).
+/// - v5→v6: added `InputEvent::MouseMoveRel` for streaming relative deltas
+///   during an active session. `MouseMove` remains but its role narrows to
+///   "one-shot entry warp sent immediately after FocusAcquired." v5 peers
+///   are cleanly rejected by the version check in `server.rs`.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Hard cap on clipboard text bytes so a peer can't force us to buffer
 /// unbounded strings. 64 KiB is well beyond typical copy-paste text.
@@ -127,11 +130,17 @@ pub enum TransferMessage {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "kind")]
 pub enum InputEvent {
-    /// Absolute cursor position in the sender's **physical virtual-desktop**
-    /// coordinate space (v5). Receivers scale to their own physical space
-    /// using `state.remote_screen` and apply a per-platform OS-boundary
-    /// conversion at inject time.
+    /// **Entry warp** — absolute position in the RECEIVER's physical
+    /// virtual-desktop coord space (v5 semantic carried forward). Sent
+    /// exactly once by the sender right after edge activation to place the
+    /// remote cursor at the entry point. All subsequent motion in the same
+    /// session comes through `MouseMoveRel`.
     MouseMove { x: f64, y: f64 },
+    /// **Streaming delta** (v6). HID-layer relative motion, already scaled
+    /// by the sender to receiver-physical units. The receiver applies it
+    /// to its own cursor and sums it into a tracked cursor position for
+    /// the ReturnToSender edge check.
+    MouseMoveRel { dx: f64, dy: f64 },
     MouseButton { button: u8, pressed: bool },
     MouseScroll { dx: i64, dy: i64 },
     Key { key: String, pressed: bool },
@@ -204,4 +213,33 @@ pub async fn send_enc_transfer_msg<W: AsyncWrite + Unpin>(
     let len = sealed.len() as u32;
     if writer.write_all(&len.to_be_bytes()).await.is_err() { return false; }
     writer.write_all(&sealed).await.is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip every InputEvent variant through serde_json so a future
+    /// rename / field reorder can't silently change the wire format. v6
+    /// introduced `MouseMoveRel`; this anchors it.
+    #[test]
+    fn input_event_serde_roundtrip() {
+        let cases = vec![
+            InputEvent::MouseMove { x: 100.5, y: 200.25 },
+            InputEvent::MouseMoveRel { dx: -3.5, dy: 7.0 },
+            InputEvent::MouseButton { button: 1, pressed: true },
+            InputEvent::MouseScroll { dx: 0, dy: -1 },
+            InputEvent::Key { key: "KeyA".into(), pressed: false },
+        ];
+        for ev in cases {
+            let bytes = serde_json::to_vec(&ev).expect("serialize");
+            let back: InputEvent = serde_json::from_slice(&bytes).expect("deserialize");
+            assert_eq!(format!("{:?}", ev), format!("{:?}", back));
+        }
+    }
+
+    #[test]
+    fn protocol_version_is_v6() {
+        assert_eq!(PROTOCOL_VERSION, 6);
+    }
 }

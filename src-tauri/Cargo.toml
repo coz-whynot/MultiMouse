@@ -1,6 +1,6 @@
 [package]
 name = "multimouse"
-version = "0.3.0"
+version = "0.3.4"
 description = "Share mouse and keyboard across devices"
 authors = ["MultiMouse Contributors"]
 license = "MIT"
@@ -55,3 +55,24 @@ subtle = "2"
 objc2 = "0.5"
 objc2-foundation = "0.2"
 objc2-app-kit = { version = "0.2", features = ["NSWorkspace", "NSRunningApplication"] }
+# v6 raw-mouse HID tap: CGEventTap at kCGHIDEventTap + CGAssociate(false) +
+# CGEventGetIntegerValueField for MOUSE_EVENT_DELTA_X/Y. core-graphics 0.23 has
+# the field constants we need; we drop events via raw FFI because the safe
+# wrapper can't return NULL from the callback (see comments in raw_mouse_mac.rs).
+core-graphics = "0.23"
+core-foundation = "0.9"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Phase 4: Windows Raw Input (WM_INPUT + RegisterRawInputDevices) for
+# relative mouse deltas on the sender side. Also used by fullscreen_detect
+# (SHQueryUserNotificationState) for auto-gaming-mode. Windows crate is the
+# official MS-published FFI binding; features listed are the narrow surface
+# we actually use so rustc doesn't build the whole Win32 universe.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_LibraryLoader",
+] }

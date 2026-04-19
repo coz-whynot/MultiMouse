@@ -20,6 +20,16 @@ pub fn run() {
         .with_env_filter("multimouse=debug,warn")
         .init();
 
+    // If the previous process crashed mid-session via SIGKILL / force-quit
+    // (panic hook and Drop chains can't recover from those), the user's
+    // cursor may still be hidden and/or disassociated. A preemptive
+    // restore at startup undoes the damage before any session begins.
+    // Both calls are no-ops if state is already normal.
+    #[cfg(target_os = "macos")]
+    input::raw_mouse_mac::recover_from_previous_crash();
+    #[cfg(target_os = "windows")]
+    input::raw_mouse_win::recover_from_previous_crash();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -120,6 +130,12 @@ pub fn run() {
 
             input::inject::start_injector(app.handle().clone(), state.clone());
             input::capture::start(app.handle().clone(), state.clone());
+            // Auto-gaming-mode polling — detects foreground fullscreen
+            // apps and toggles `gaming_mode` when the user has opted in
+            // via `settings.auto_gaming_mode`. Skipped on Linux until we
+            // add an X11/Wayland detector.
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            input::fullscreen_detect::start(app.handle().clone(), state.clone());
             start_clipboard_writer(state.clone());
 
             // Periodically refresh monitor info so edge detection stays accurate when

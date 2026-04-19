@@ -156,24 +156,36 @@ pub async fn take_control(app: tauri::AppHandle, state: State<'_, Arc<AppState>>
         return Err("Not connected to any device".to_string());
     }
 
-    // Center the local cursor on this machine so the OS can report real motion
-    // deltas (if it were at a screen edge, subsequent moves would be clamped).
+    // On Linux only, warp the local cursor to screen center so the
+    // absolute-delta fallback has travel room. macOS/Windows capture raw
+    // HID deltas independent of cursor position — no warp needed.
     let monitors = state.monitors.read().clone();
     let (min_x, min_y, max_x, max_y) = crate::screen::layout::virtual_bounds(&monitors);
-    let center_x = (min_x + max_x) / 2.0;
-    let center_y = (min_y + max_y) / 2.0;
-    crate::input::inject::warp_abs(center_x as i32, center_y as i32);
+    #[cfg(target_os = "linux")]
+    {
+        let center_x = (min_x + max_x) / 2.0;
+        let center_y = (min_y + max_y) / 2.0;
+        crate::input::inject::warp_abs(center_x as i32, center_y as i32);
+    }
 
-    // Place the remote cursor at the center of the remote screen too, and set
-    // up the delta anchor so subsequent mouse motion translates into coordinate
-    // updates in the remote's screen space.
+    // Remote-cursor entry point = center of peer's screen. The FocusAcquired
+    // + MouseMove pair seeds that position on the peer.
     let remote = *state.remote_screen.lock();
     let (rw, rh) = remote.unwrap_or((max_x - min_x, max_y - min_y));
     let rx = rw / 2.0;
     let ry = rh / 2.0;
 
-    *state.relay_entry.lock() = Some((center_x, center_y, rx, ry));
+    *state.relay_entry.lock() = Some((rx, ry));
     state.set_relaying(true);
+    // Install the platform RelayGuard so the mac HID tap / Windows Raw
+    // Input window come up. Missing this was the reason "Take Control"
+    // via the tray menu didn't invoke the new raw-delta path — fixed now.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        *state.relay_guard.lock() = Some(
+            crate::input::RelayGuard::activate(state.inner().clone())
+        );
+    }
     state.send_net(NetCommand::Input(
         crate::network::protocol::InputEvent::MouseMove { x: rx, y: ry },
     ));

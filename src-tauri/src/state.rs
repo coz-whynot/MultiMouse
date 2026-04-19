@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Instant;
 use parking_lot::{Mutex, RwLock};
@@ -66,11 +66,38 @@ pub struct Settings {
     pub privacy_blur_on_relay: bool,
     #[serde(default)]
     pub gaming_mode: bool,
+    /// When true (default), the local cursor is hidden during an active relay
+    /// session. Streamers who capture their desktop (OBS display-capture or
+    /// ScreenCaptureKit) may want this off so the cursor remains visible on
+    /// stream. The cursor is still frozen in place — this only controls
+    /// visibility, not motion.
+    #[serde(default = "default_hide_cursor_during_relay")]
+    pub hide_cursor_during_relay: bool,
+    /// When true (default), `gaming_mode` is auto-enabled whenever a
+    /// fullscreen foreground app is detected on this machine. Prevents
+    /// accidental edge-crossing during gameplay. User can still manually
+    /// toggle via the hotkey.
+    #[serde(default = "default_auto_gaming_mode")]
+    pub auto_gaming_mode: bool,
+    /// "Swap control" hotkeys. Active **only when `gaming_mode` is true** —
+    /// outside gaming mode the mouse flows freely across screens via
+    /// normal edge-cross. When gaming_mode is on (edge-cross disabled to
+    /// prevent accidental crosses mid-game), pressing any of these keys
+    /// immediately swaps which machine has the keyboard+mouse.
+    ///
+    /// Format: list of key names (e.g. `["F13", "ScrollLock", "Pause"]`).
+    /// Up to 9 entries honoured; any beyond are ignored. Empty list means
+    /// no swap hotkey — the user must manually toggle gaming_mode via
+    /// `hotkey_release` or the tray menu to switch sides.
+    #[serde(default)]
+    pub switch_hotkeys: Vec<String>,
 }
 
 fn default_edge_dwell_ms() -> u32 { 150 }
 fn default_auto_reconnect() -> bool { true }
 fn default_privacy_blur() -> bool { true }
+fn default_hide_cursor_during_relay() -> bool { true }
+fn default_auto_gaming_mode() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -86,6 +113,9 @@ impl Default for Settings {
             idle_lock_minutes: 0,
             privacy_blur_on_relay: false,
             gaming_mode: false,
+            hide_cursor_during_relay: true,
+            auto_gaming_mode: true,
+            switch_hotkeys: Vec::new(),
         }
     }
 }
@@ -148,8 +178,15 @@ pub struct AppState {
     pub mdns_fullname_to_id: Mutex<HashMap<String, String>>,
     /// Remote machine's screen size (received from server on connect)
     pub remote_screen: Mutex<Option<(f64, f64)>>,
-    /// Cursor positions at the moment relay was activated: (local_x, local_y, remote_entry_x, remote_entry_y)
-    pub relay_entry: Mutex<Option<(f64, f64, f64, f64)>>,
+    /// `(remote_entry_x, remote_entry_y)` — where on the peer's screen the
+    /// cursor landed when this session was activated. Used to seed the
+    /// remote-cursor position before the first `MouseMoveRel` arrives, and
+    /// as the anchor the Linux absolute-delta fallback in
+    /// `capture::convert_and_remap` offsets from. A local cursor-position
+    /// anchor is no longer stored here — on macOS and Windows the HID/Raw-
+    /// Input paths capture deltas directly; on Linux the fallback tracks
+    /// its own `thread_local` anchor, reset each time this field changes.
+    pub relay_entry: Mutex<Option<(f64, f64)>>,
     /// mDNS daemon handle (stored so we can shut it down cleanly on app exit)
     pub mdns: Mutex<Option<mdns_sd::ServiceDaemon>>,
     /// Secret token required to connect to the phone-trackpad server
@@ -196,6 +233,22 @@ pub struct AppState {
     /// any. When the user initiates a new connection we abort the old handle
     /// so a stale loop can't race with the new session.
     pub reconnect_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// v6 — RAII handle for the platform's raw-mouse-delta capture. Set by
+    /// capture.rs at edge activation, cleared on every release path. The
+    /// Drop impl tears down the OS-level capture (HID tap on macOS, Raw
+    /// Input hidden-window on Windows) and restores cursor visibility /
+    /// association. The per-platform `RelayGuard` types are re-exported
+    /// as `crate::input::RelayGuard` so this field has a single name
+    /// across OSes. Not present on Linux (falls back to rdev listen).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub relay_guard: Mutex<Option<crate::input::RelayGuard>>,
+    /// v6 Phase 6 — names of modifier keys the SENDER has shipped as
+    /// `KeyPress` but not yet `KeyRelease`. On graceful session end the
+    /// client sends a release burst for these so the peer doesn't get
+    /// stuck with Shift/Ctrl/Alt/Meta held. Server-side has its own
+    /// local tracker inside `handle_controller` for the abrupt-disconnect
+    /// case (TCP drop mid-hold) — that's the belt to this's suspenders.
+    pub held_modifiers: Mutex<HashSet<String>>,
 }
 
 /// Commands for the persistent clipboard-writer thread. Only the latest
@@ -250,6 +303,9 @@ impl AppState {
             last_release: Mutex::new(None),
             clipboard_tx: Mutex::new(None),
             reconnect_handle: Mutex::new(None),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            relay_guard: Mutex::new(None),
+            held_modifiers: Mutex::new(HashSet::new()),
         }
     }
 
@@ -343,6 +399,19 @@ impl AppState {
 
     pub fn set_relaying(&self, active: bool) {
         self.relay_active.store(active, Ordering::SeqCst);
+        // v6 — when relay ends, drop the RAII guard. Its Drop impl tears
+        // down the platform capture (HID tap on macOS, Raw Input window on
+        // Windows) and restores cursor state. This one centralised hook
+        // covers every release path (Escape, hotkey, ReturnToSender,
+        // FocusReleased, cleanup, idle-lock, tray-disconnect, switch hotkey)
+        // without needing per-site edits — missing a site would leave the
+        // OS cursor hidden/disassociated until reboot.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            if !active {
+                *self.relay_guard.lock() = None;
+            }
+        }
     }
 
     pub fn is_controlled(&self) -> bool {

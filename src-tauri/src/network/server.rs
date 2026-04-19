@@ -557,6 +557,22 @@ pub async fn handle_controller(
     // edge by at least this much before return-detection is allowed.
     let departed_threshold: f64 = 60.0;
     let mut departed = false;
+    // v6 cursor tracking: after Phase 3/5, the sender ships a single
+    // MouseMove (entry warp) followed by a stream of MouseMoveRel. To keep
+    // the ReturnToSender edge check firing on every motion event, we track
+    // the cursor in-process here — the entry warp sets it, each rel delta
+    // accumulates. None means "no entry warp received yet in this session."
+    let mut cursor_pos: Option<(f64, f64)> = None;
+
+    // Phase 6 held-modifier tracking (receiver side). Record every
+    // modifier key we inject as pressed; remove on release. If the
+    // session ends for any reason (clean Bye OR abrupt TCP drop) with
+    // keys still in the set, we synthesise KeyReleases so the local user
+    // isn't stuck with Shift/Ctrl/Alt/Meta held. This is the belt to the
+    // controller-side release burst's suspenders — the controller's burst
+    // can't reach us if its socket already died, but our local tracking
+    // still unblocks the local user.
+    let mut local_held: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         // Sequential read — cancel-safety is no longer a concern because the
         // read is never cancelled by a sibling branch. The disconnect-listener
@@ -584,34 +600,32 @@ pub async fn handle_controller(
                 state.mark_activity();
                 match msg {
                     Message::Input(event) => {
-                        // Detect the entry edge on the first MouseMove after
-                        // FocusAcquired, and the return-edge crossing on every
-                        // subsequent MouseMove. Coordinates are already in our
-                        // local screen space (client remaps via delta tracking).
-                        // Use the monitors-based virtual bounds (not
-                        // rdev::display_size() which is primary-only) so
-                        // multi-monitor receivers get the correct far edges.
-                        if let crate::network::protocol::InputEvent::MouseMove { x, y } = event {
+                        // v6 cursor tracking: delegate to the pure helper
+                        // so the state machine is unit-testable. MouseMove
+                        // (entry warp) sets cursor_pos; MouseMoveRel
+                        // accumulates; other variants don't change it.
+                        let effective_cursor = update_cursor(&mut cursor_pos, &event);
+
+                        if let Some((x, y)) = effective_cursor {
+                            // Detect the entry edge on the first MouseMove
+                            // after FocusAcquired, and the return-edge
+                            // crossing on every subsequent motion event.
+                            // Coordinates are in this receiver's physical
+                            // virtual-desktop space (sender did the scaling).
                             let (bx0, by0, bx1, by1) = {
                                 let monitors = state.monitors.read().clone();
                                 crate::screen::layout::virtual_bounds(&monitors)
                             };
                             let lw = (bx1 - bx0).max(1.0);
                             let lh = (by1 - by0).max(1.0);
-                            // Translate cursor into 0..lw/0..lh coordinate space.
                             let x_rel = x - bx0;
                             let y_rel = y - by0;
                             if entry_edge.is_none() && state.is_controlled() {
-                                // Decide which edge the cursor came in from by
-                                // proximity (entry_point is placed near the edge
-                                // by the controller's compute_entry_point).
-                                //
-                                // v5 note: the previous fallthrough here unconditionally
-                                // labelled non-edge entries as "bottom", which caused
-                                // false ReturnToSender fires when the user moved the
-                                // cursor downward. Now we leave `entry_edge = None`
-                                // until a MouseMove genuinely lands near an edge; the
-                                // return check below is skipped in that state.
+                                // Decide which edge the cursor came in from
+                                // by proximity. Leave `entry_edge = None` if
+                                // the MouseMove landed mid-screen; the return
+                                // check below is skipped in that state
+                                // rather than falsely labelling it "bottom."
                                 entry_edge =
                                     if      x_rel < 10.0      { Some("left") }
                                     else if x_rel > lw - 10.0 { Some("right") }
@@ -623,10 +637,6 @@ pub async fn handle_controller(
                                     departed = false;
                                 }
                             } else if entry_edge.is_some() && !return_sent {
-                                // First the cursor has to move AWAY from the
-                                // entry edge by `departed_threshold`; otherwise
-                                // the entry position itself would re-satisfy
-                                // the return threshold and fire immediately.
                                 if !departed {
                                     departed = match entry_edge {
                                         Some("left")   => x_rel > departed_threshold,
@@ -636,8 +646,6 @@ pub async fn handle_controller(
                                         _ => false,
                                     };
                                 }
-                                // Has the injected cursor reached the entry
-                                // edge again? If so, controller takes back.
                                 let at_return_edge = departed && match entry_edge {
                                     Some("left")   => x_rel <= return_edge_threshold,
                                     Some("right")  => x_rel >= lw - return_edge_threshold - 1.0,
@@ -658,6 +666,11 @@ pub async fn handle_controller(
                                 }
                             }
                         }
+                        // Phase 6 held-modifier tracking. Has to happen
+                        // before inject::process_event because ownership
+                        // of `event` transfers there. Delegates to the
+                        // pure helper for testability.
+                        update_held_modifiers(&mut local_held, &event);
                         inject::process_event(event);
                     }
                     Message::FocusAcquired => {
@@ -665,6 +678,7 @@ pub async fn handle_controller(
                         entry_edge = None;
                         return_sent = false;
                         departed = false;
+                        cursor_pos = None;
                         let _ = app.emit("focus-acquired", ());
                     }
                     Message::FocusReleased => {
@@ -672,6 +686,7 @@ pub async fn handle_controller(
                         entry_edge = None;
                         return_sent = false;
                         departed = false;
+                        cursor_pos = None;
                         let _ = app.emit("focus-released", ());
                     }
                     Message::ClipboardText { text } => {
@@ -693,6 +708,22 @@ pub async fn handle_controller(
                 }
             }
             None => break, // parse error or connection closed
+        }
+    }
+
+    // Phase 6 — release burst. If the controller stream ended while
+    // any modifier was still "held" in our local tracker, synthesise
+    // KeyReleases locally so the user isn't stuck with Shift/Ctrl/Alt/Meta
+    // pressed. Runs on ALL session-end paths (clean Bye, abrupt TCP drop,
+    // idle watchdog, disconnect signal). If the set is empty (controller
+    // sent its own release burst before going away, or the user wasn't
+    // holding anything), this is a no-op.
+    if !local_held.is_empty() {
+        tracing::info!("[server] session ending with {} held modifier(s); releasing", local_held.len());
+        for key in local_held.drain() {
+            inject::process_event(
+                crate::network::protocol::InputEvent::Key { key, pressed: false },
+            );
         }
     }
 
@@ -790,5 +821,179 @@ async fn cleanup(
     });
 
     let _ = app.emit("disconnected", ());
+}
+
+// ---------- Pure helpers (v0.3.4 Phase 7) --------------------------------
+//
+// Extracted from `handle_controller`'s Input match arm so the state-machine
+// logic is unit-testable without needing to stand up a TCP pair +
+// encryption handshake + tokio runtime.
+
+/// Update the session's tracked cursor position based on an incoming
+/// `InputEvent`. Returns the new cursor position after applying the event,
+/// or `None` if the event doesn't affect cursor tracking.
+///
+/// - `MouseMove { x, y }` — entry warp: overwrite to absolute.
+/// - `MouseMoveRel { dx, dy }` — accumulate. No-op (returns None) if
+///   no entry warp has arrived yet (defensive; shouldn't happen under
+///   the Phase 3/4 sender which always sends MouseMove first).
+/// - All other variants: return `None` without modifying cursor.
+pub(super) fn update_cursor(
+    cursor: &mut Option<(f64, f64)>,
+    event: &crate::network::protocol::InputEvent,
+) -> Option<(f64, f64)> {
+    use crate::network::protocol::InputEvent;
+    match event {
+        InputEvent::MouseMove { x, y } => {
+            *cursor = Some((*x, *y));
+            Some((*x, *y))
+        }
+        InputEvent::MouseMoveRel { dx, dy } => {
+            if let Some((cx, cy)) = *cursor {
+                let new = (cx + dx, cy + dy);
+                *cursor = Some(new);
+                Some(new)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Update the session's tracked held-modifier set based on an incoming
+/// `InputEvent`. Inserts the key name on `KeyPress`, removes on
+/// `KeyRelease`. Non-modifier keys and non-Key events are ignored.
+pub(super) fn update_held_modifiers(
+    held: &mut std::collections::HashSet<String>,
+    event: &crate::network::protocol::InputEvent,
+) {
+    use crate::network::protocol::InputEvent;
+    if let InputEvent::Key { key, pressed } = event {
+        if crate::input::is_modifier_key_name(key) {
+            if *pressed {
+                held.insert(key.clone());
+            } else {
+                held.remove(key);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::protocol::InputEvent;
+    use std::collections::HashSet;
+
+    // ---- update_cursor ------------------------------------------------
+
+    #[test]
+    fn mouse_move_sets_absolute_cursor() {
+        let mut cursor = None;
+        let out = update_cursor(&mut cursor, &InputEvent::MouseMove { x: 123.0, y: 456.0 });
+        assert_eq!(out, Some((123.0, 456.0)));
+        assert_eq!(cursor, Some((123.0, 456.0)));
+    }
+
+    #[test]
+    fn mouse_move_rel_accumulates_after_entry_warp() {
+        let mut cursor = None;
+        update_cursor(&mut cursor, &InputEvent::MouseMove { x: 100.0, y: 200.0 });
+        update_cursor(&mut cursor, &InputEvent::MouseMoveRel { dx: 5.0, dy: -3.0 });
+        update_cursor(&mut cursor, &InputEvent::MouseMoveRel { dx: 2.0, dy: 1.0 });
+        assert_eq!(cursor, Some((107.0, 198.0)));
+    }
+
+    #[test]
+    fn mouse_move_rel_before_entry_is_ignored() {
+        let mut cursor = None;
+        let out = update_cursor(&mut cursor, &InputEvent::MouseMoveRel { dx: 10.0, dy: 10.0 });
+        assert!(out.is_none());
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn non_motion_events_do_not_touch_cursor() {
+        let mut cursor = Some((50.0, 50.0));
+        update_cursor(&mut cursor, &InputEvent::Key { key: "KeyA".into(), pressed: true });
+        update_cursor(&mut cursor, &InputEvent::MouseButton { button: 0, pressed: true });
+        update_cursor(&mut cursor, &InputEvent::MouseScroll { dx: 0, dy: 1 });
+        assert_eq!(cursor, Some((50.0, 50.0)));
+    }
+
+    // ---- update_held_modifiers -----------------------------------------
+
+    #[test]
+    fn modifier_press_inserts_release_removes() {
+        let mut held = HashSet::new();
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true });
+        assert!(held.contains("ShiftLeft"));
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: false });
+        assert!(!held.contains("ShiftLeft"));
+    }
+
+    #[test]
+    fn non_modifier_keys_are_not_tracked() {
+        let mut held = HashSet::new();
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "KeyA".into(), pressed: true });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "F1".into(), pressed: true });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "Space".into(), pressed: true });
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn multiple_modifiers_coexist() {
+        let mut held = HashSet::new();
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ControlLeft".into(), pressed: true });
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "Alt".into(), pressed: true });
+        assert_eq!(held.len(), 3);
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ControlLeft".into(), pressed: false });
+        assert_eq!(held.len(), 2);
+        assert!(held.contains("ShiftLeft"));
+        assert!(held.contains("Alt"));
+    }
+
+    #[test]
+    fn all_modifier_variants_tracked() {
+        let mods = [
+            "ShiftLeft", "ShiftRight",
+            "ControlLeft", "ControlRight",
+            "MetaLeft", "MetaRight",
+            "Alt", "AltGr",
+        ];
+        let mut held = HashSet::new();
+        for m in mods {
+            update_held_modifiers(&mut held, &InputEvent::Key { key: m.into(), pressed: true });
+        }
+        assert_eq!(held.len(), mods.len());
+    }
+
+    // ---- end-to-end sequence -------------------------------------------
+
+    /// Simulate a session where the controller holds Shift, moves the
+    /// cursor via MouseMoveRel, and then the socket dies. After the
+    /// session ends, we drain `held` — the user should get a KeyRelease
+    /// for Shift (tested by asserting the set is non-empty at the
+    /// session-end boundary).
+    #[test]
+    fn stuck_shift_is_detectable_at_session_end() {
+        let mut cursor = None;
+        let mut held = HashSet::new();
+
+        // Session start: entry warp places cursor at peer's left edge.
+        update_cursor(&mut cursor, &InputEvent::MouseMove { x: 1.0, y: 300.0 });
+        // User presses Shift on the controller and starts typing.
+        update_held_modifiers(&mut held, &InputEvent::Key { key: "ShiftLeft".into(), pressed: true });
+        update_cursor(&mut cursor, &InputEvent::MouseMoveRel { dx: 50.0, dy: 0.0 });
+        update_cursor(&mut cursor, &InputEvent::MouseMoveRel { dx: 50.0, dy: 10.0 });
+
+        // Socket dies mid-hold — no Release received for Shift. The
+        // session-end handler will drain this set to synthesise releases.
+        assert_eq!(held.len(), 1);
+        assert!(held.contains("ShiftLeft"));
+        assert_eq!(cursor, Some((101.0, 310.0)));
+    }
 }
 
