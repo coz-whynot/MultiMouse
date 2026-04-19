@@ -57,15 +57,15 @@ export const UpdateBanner = () => {
         className="mx-3 mt-1 mb-0"
       >
         <div className="rounded-xl p-2.5 flex items-center gap-2"
-          style={{ background: 'rgba(99,102,241,0.1)', border: '1px solid rgba(99,102,241,0.2)' }}>
+          style={{ background: 'var(--accent-soft-bg)', border: '1px solid var(--accent-soft-br)' }}>
           <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24"
-            stroke="rgba(129,140,248,0.9)" strokeWidth={2}>
+            stroke="var(--accent-primary)" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round"
               d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
           </svg>
-          <p className="text-[10px] flex-1 min-w-0" style={{ color: 'rgba(167,139,250,0.85)' }}>
+          <p className="text-[10px] flex-1 min-w-0" style={{ color: 'var(--accent-primary)' }}>
             {installError
-              ? <span style={{ color: '#f87171' }}>Install failed — try again</span>
+              ? <span style={{ color: 'var(--danger)' }}>Install failed — try again</span>
               : <><span className="font-semibold">v{update.version}</span> available</>
             }
           </p>
@@ -75,7 +75,7 @@ export const UpdateBanner = () => {
             className="text-[10px] font-semibold rounded-lg px-2 py-1 transition-all disabled:opacity-50 flex-shrink-0"
             style={{
               background: 'rgba(99,102,241,0.2)',
-              color: '#818cf8',
+              color: 'var(--accent-primary)',
             }}
           >
             {installing ? 'Installing…' : installError ? 'Retry' : 'Update'}
@@ -83,7 +83,7 @@ export const UpdateBanner = () => {
           <button
             onClick={() => setDismissed(true)}
             className="flex-shrink-0 transition-colors"
-            style={{ color: 'rgba(129,140,248,0.45)' }}
+            style={{ color: 'var(--accent-muted)' }}
           >
             <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

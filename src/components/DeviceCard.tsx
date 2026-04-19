@@ -48,11 +48,11 @@ const StatusText = ({
   peer: PeerInfo;
   isConnecting: boolean;
 }) => {
-  if (peer.status === 'connected') return <span style={{ color: '#a78bfa' }}>Connected</span>;
+  if (peer.status === 'connected') return <span style={{ color: 'var(--accent-primary)' }}>Connected</span>;
   if (isConnecting || peer.status === 'pairing')
-    return <span style={{ color: '#fbbf24' }}>Awaiting approval…</span>;
-  if (peer.status === 'error') return <span style={{ color: '#f87171' }}>Failed to connect</span>;
-  return <span style={{ color: 'rgba(255,255,255,0.4)' }}>Tap to connect</span>;
+    return <span style={{ color: 'var(--warn)' }}>Awaiting approval…</span>;
+  if (peer.status === 'error') return <span style={{ color: 'var(--danger)' }}>Failed to connect</span>;
+  return <span style={{ color: 'var(--text-muted)' }}>Tap to connect</span>;
 };
 
 export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
@@ -115,7 +115,7 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
               : peer.status === 'error'
               ? '#ef4444'
               : '#10b981',
-            borderColor: '#100c2a',
+            borderColor: 'var(--bg-base)',
           }}
         />
       </div>
@@ -123,7 +123,7 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
       {/* Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1">
-          <p className="text-sm font-bold text-white truncate leading-tight">{peer.name}</p>
+          <p className="text-sm font-bold truncate leading-tight" style={{ color: 'var(--text-primary)' }}>{peer.name}</p>
           {peer.is_known && !isConnected && (
             <span
               className="text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide flex-shrink-0"
@@ -148,9 +148,9 @@ export const DeviceCard = ({ peer, onConnect, isConnecting }: Props) => {
             className="w-2 h-2 rounded-full"
             animate={{ scale: [1, 1.6, 1], opacity: [1, 0.4, 1] }}
             transition={{ repeat: Infinity, duration: 1.8 }}
-            style={{ background: '#818cf8' }}
+            style={{ background: 'var(--accent-secondary)' }}
           />
-          <span className="text-xs font-semibold" style={{ color: '#a78bfa' }}>Live</span>
+          <span className="text-xs font-semibold" style={{ color: 'var(--accent-primary)' }}>Live</span>
         </div>
       ) : isConnecting ? (
         <motion.div

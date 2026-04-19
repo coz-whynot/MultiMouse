@@ -14,6 +14,111 @@
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
 }
 
+/* ── Semantic theme tokens ──
+   Values resolve dynamically against the nearest [data-theme] ancestor.
+   We keep the dark palette on :root so anything rendered before React
+   hydrates (e.g. the chromeless Tauri shell) picks the dark defaults. */
+:root,
+[data-theme="dark"] {
+  --bg-base:        #0f0c29;
+  --bg-gradient:    linear-gradient(160deg, #0f0c29 0%, #1a0d4a 45%, #0d1535 100%);
+  --bg-card:        rgba(22, 20, 50, 0.62);
+  --bg-card-strong: rgba(22, 20, 50, 0.92);
+  --bg-subtle:      rgba(255, 255, 255, 0.05);
+  --bg-subtle-2:    rgba(255, 255, 255, 0.035);
+  --bg-hover:       rgba(255, 255, 255, 0.08);
+  --bg-overlay:     rgba(6, 6, 16, 0.88);
+  --bg-input:       rgba(255, 255, 255, 0.05);
+
+  --text-primary:   #ffffff;
+  --text-strong:    rgba(255, 255, 255, 0.85);
+  --text-secondary: rgba(255, 255, 255, 0.72);
+  --text-body:      rgba(255, 255, 255, 0.6);
+  --text-muted:     rgba(255, 255, 255, 0.42);
+  --text-faint:     rgba(255, 255, 255, 0.28);
+  --text-ghost:     rgba(255, 255, 255, 0.18);
+  --text-inverse:   #0f0c29;
+
+  --border-subtle:  rgba(255, 255, 255, 0.07);
+  --border:         rgba(99, 102, 241, 0.22);
+  --border-strong:  rgba(99, 102, 241, 0.32);
+  --divider:        rgba(255, 255, 255, 0.06);
+
+  /* Accent stays consistent so brand purple reads identically in both
+     themes, but we expose it as a token for readability. */
+  --accent-primary:   #a78bfa;
+  --accent-secondary: #818cf8;
+  --accent-muted:     rgba(167, 139, 250, 0.6);
+  --accent-soft-bg:   rgba(99, 102, 241, 0.1);
+  --accent-soft-br:   rgba(99, 102, 241, 0.22);
+
+  --success: #34d399;
+  --warn:    #fbbf24;
+  --danger:  #f87171;
+
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --shadow-hero: 0 32px 80px rgba(0, 0, 0, 0.7);
+
+  --scrollbar-thumb: rgba(99, 102, 241, 0.3);
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg-base:        #f5f7ff;
+  --bg-gradient:    linear-gradient(160deg, #f8fafc 0%, #eef2ff 45%, #e0e7ff 100%);
+  --bg-card:        rgba(255, 255, 255, 0.82);
+  --bg-card-strong: rgba(255, 255, 255, 0.96);
+  --bg-subtle:      rgba(79, 70, 229, 0.06);
+  --bg-subtle-2:    rgba(79, 70, 229, 0.04);
+  --bg-hover:       rgba(79, 70, 229, 0.1);
+  --bg-overlay:     rgba(30, 27, 75, 0.48);
+  --bg-input:       rgba(255, 255, 255, 0.85);
+
+  --text-primary:   #0f172a;                 /* slate-900 */
+  --text-strong:    rgba(15, 23, 42, 0.92);
+  --text-secondary: rgba(15, 23, 42, 0.76);
+  --text-body:      rgba(15, 23, 42, 0.62);
+  --text-muted:     rgba(15, 23, 42, 0.5);
+  --text-faint:     rgba(15, 23, 42, 0.34);
+  --text-ghost:     rgba(15, 23, 42, 0.2);
+  --text-inverse:   #ffffff;
+
+  --border-subtle:  rgba(15, 23, 42, 0.08);
+  --border:         rgba(79, 70, 229, 0.3);
+  --border-strong:  rgba(79, 70, 229, 0.45);
+  --divider:        rgba(15, 23, 42, 0.08);
+
+  --accent-primary:   #4f46e5;               /* indigo-600 */
+  --accent-secondary: #6366f1;               /* indigo-500 */
+  --accent-muted:     rgba(79, 70, 229, 0.7);
+  --accent-soft-bg:   rgba(79, 70, 229, 0.08);
+  --accent-soft-br:   rgba(79, 70, 229, 0.22);
+
+  --success: #059669;
+  --warn:    #d97706;
+  --danger:  #dc2626;
+
+  --shadow-card: 0 4px 20px rgba(30, 27, 75, 0.08);
+  --shadow-hero: 0 32px 80px rgba(30, 27, 75, 0.18);
+
+  --scrollbar-thumb: rgba(79, 70, 229, 0.35);
+  color-scheme: light;
+}
+
+/* Expose tokens to Tailwind so `bg-surface`, `text-fg`, etc. work. */
+@theme {
+  --color-fg:          var(--text-primary);
+  --color-fg-strong:   var(--text-strong);
+  --color-fg-secondary:var(--text-secondary);
+  --color-fg-body:     var(--text-body);
+  --color-fg-muted:    var(--text-muted);
+  --color-fg-faint:    var(--text-faint);
+  --color-surface:     var(--bg-card);
+  --color-surface-subtle: var(--bg-subtle);
+  --color-border-subtle:  var(--border-subtle);
+  --color-border-token:   var(--border);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -37,7 +142,7 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(99, 102, 241, 0.3);
+  background: var(--scrollbar-thumb);
   border-radius: 2px;
 }
 

@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion';
+import { useStore } from '../store/useStore';
 
 type Page = 'home' | 'layout' | 'settings';
 
@@ -33,66 +34,75 @@ const TABS: { id: Page; label: string }[] = [
   { id: 'settings', label: 'Settings' },
 ];
 
-export const BottomNav = ({ current, onChange, connectedPeer }: Props) => (
-  <div
-    className="flex-shrink-0 flex px-3 pb-3 pt-2 gap-1"
-    style={{ borderTop: '1px solid rgba(255,255,255,0.07)' }}
-  >
-    {TABS.map(({ id, label }) => {
-      const active = current === id;
-      const hasBadge = id === 'layout' && connectedPeer;
+export const BottomNav = ({ current, onChange, connectedPeer }: Props) => {
+  // Active pill is indigo-tinted on both themes, but we bump its opacity in
+  // light mode so it reads clearly against the near-white chrome.
+  const isLight = useStore((s) => s.settings?.theme === 'light');
+  const activeBg = isLight ? 'rgba(79,70,229,0.12)' : 'rgba(99,102,241,0.14)';
+  const activeColor = isLight ? '#4f46e5' : '#a78bfa';
+  const idleColor = isLight ? 'rgba(15,23,42,0.5)' : 'rgba(255,255,255,0.32)';
 
-      return (
-        <button
-          key={id}
-          onClick={() => onChange(id)}
-          className="flex-1 flex flex-col items-center gap-1.5 py-2 rounded-2xl transition-colors duration-150 relative"
-          style={{
-            background: active ? 'rgba(99,102,241,0.14)' : 'transparent',
-          }}
-        >
-          {/* Live badge */}
-          {hasBadge && (
-            <motion.div
-              animate={{ scale: [1, 1.4, 1], opacity: [1, 0.5, 1] }}
-              transition={{ repeat: Infinity, duration: 2.2 }}
-              className="absolute top-2 right-[calc(50%-18px)] w-2 h-2 rounded-full"
-              style={{ background: '#34d399', boxShadow: '0 0 6px #34d39966' }}
-            />
-          )}
+  return (
+    <div
+      className="flex-shrink-0 flex px-3 pb-3 pt-2 gap-1"
+      style={{ borderTop: '1px solid var(--border-subtle)' }}
+    >
+      {TABS.map(({ id, label }) => {
+        const active = current === id;
+        const hasBadge = id === 'layout' && connectedPeer;
 
-          <motion.span
-            animate={{ color: active ? '#a78bfa' : 'rgba(255,255,255,0.32)' }}
-            transition={{ duration: 0.15 }}
+        return (
+          <button
+            key={id}
+            onClick={() => onChange(id)}
+            className="flex-1 flex flex-col items-center gap-1.5 py-2 rounded-2xl transition-colors duration-150 relative"
+            style={{
+              background: active ? activeBg : 'transparent',
+            }}
           >
-            {id === 'home' && <HomeIcon active={active} />}
-            {id === 'layout' && <LayoutIcon active={active} />}
-            {id === 'settings' && <SettingsIcon active={active} />}
-          </motion.span>
+            {/* Live badge */}
+            {hasBadge && (
+              <motion.div
+                animate={{ scale: [1, 1.4, 1], opacity: [1, 0.5, 1] }}
+                transition={{ repeat: Infinity, duration: 2.2 }}
+                className="absolute top-2 right-[calc(50%-18px)] w-2 h-2 rounded-full"
+                style={{ background: '#34d399', boxShadow: '0 0 6px #34d39966' }}
+              />
+            )}
 
-          <motion.span
-            className="text-[9px] font-semibold uppercase tracking-wider"
-            animate={{ color: active ? '#a78bfa' : 'rgba(255,255,255,0.32)' }}
-            transition={{ duration: 0.15 }}
-          >
-            {label}
-          </motion.span>
+            <motion.span
+              animate={{ color: active ? activeColor : idleColor }}
+              transition={{ duration: 0.15 }}
+            >
+              {id === 'home' && <HomeIcon active={active} />}
+              {id === 'layout' && <LayoutIcon active={active} />}
+              {id === 'settings' && <SettingsIcon active={active} />}
+            </motion.span>
 
-          {/* Active underline pill — shared layout animation */}
-          {active && (
-            <motion.div
-              layoutId="nav-pill"
-              className="absolute bottom-1.5 rounded-full"
-              style={{
-                height: 2,
-                width: 20,
-                background: 'linear-gradient(90deg, #6366f1, #a855f7)',
-              }}
-              transition={{ type: 'spring', stiffness: 500, damping: 35 }}
-            />
-          )}
-        </button>
-      );
-    })}
-  </div>
-);
+            <motion.span
+              className="text-[9px] font-semibold uppercase tracking-wider"
+              animate={{ color: active ? activeColor : idleColor }}
+              transition={{ duration: 0.15 }}
+            >
+              {label}
+            </motion.span>
+
+            {/* Active underline pill — shared layout animation */}
+            {active && (
+              <motion.div
+                layoutId="nav-pill"
+                className="absolute bottom-1.5 rounded-full"
+                style={{
+                  height: 2,
+                  width: 20,
+                  background: 'linear-gradient(90deg, #6366f1, #a855f7)',
+                }}
+                transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+};

@@ -47,9 +47,9 @@ const formatRelativeTime = (unixSecs: number): string => {
 
 /* ── Color dot per audit action ── */
 const auditDotColor = (action: string): string => {
-  if (action === 'connected') return '#34d399';
-  if (action === 'pairing_rejected') return '#f87171';
-  return 'rgba(255,255,255,0.35)';
+  if (action === 'connected') return 'var(--success)';
+  if (action === 'pairing_rejected') return 'var(--danger)';
+  return 'var(--text-faint)';
 };
 
 const auditDotEmoji = (action: string): string => {
@@ -79,9 +79,9 @@ const Toggle = ({
 }) => (
   <div className="flex items-center justify-between gap-4">
     <div className="flex-1 min-w-0">
-      <p className="text-sm font-medium" style={{ color: 'rgba(255,255,255,0.78)' }}>{label}</p>
+      <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>{label}</p>
       {description && (
-        <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'rgba(255,255,255,0.28)' }}>
+        <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
           {description}
         </p>
       )}
@@ -96,7 +96,7 @@ const Toggle = ({
         width: 44,
         background: checked
           ? 'linear-gradient(90deg, #6366f1, #a855f7)'
-          : 'rgba(255,255,255,0.1)',
+          : 'var(--bg-hover)',
         boxShadow: checked ? '0 2px 8px rgba(99,102,241,0.35)' : 'none',
       }}
     >
@@ -115,17 +115,19 @@ const Section = ({
   title,
   icon,
   children,
+  className,
 }: {
   title: string;
   icon?: React.ReactNode;
   children: React.ReactNode;
+  className?: string;
 }) => (
-  <div className="space-y-2">
+  <div className={`space-y-2 ${className ?? ''}`}>
     <div className="flex items-center gap-2 px-1">
-      {icon && <span style={{ color: 'rgba(255,255,255,0.28)' }}>{icon}</span>}
+      {icon && <span style={{ color: 'var(--text-muted)' }}>{icon}</span>}
       <p
         className="text-[10px] font-bold uppercase tracking-widest"
-        style={{ color: 'rgba(255,255,255,0.28)' }}
+        style={{ color: 'var(--text-muted)' }}
       >
         {title}
       </p>
@@ -133,8 +135,8 @@ const Section = ({
     <div
       className="rounded-2xl overflow-hidden"
       style={{
-        background: 'rgba(255,255,255,0.035)',
-        border: '1px solid rgba(255,255,255,0.07)',
+        background: 'var(--bg-subtle-2)',
+        border: '1px solid var(--border-subtle)',
       }}
     >
       {children}
@@ -147,7 +149,7 @@ const Row = ({ children, noDivider }: { children: React.ReactNode; noDivider?: b
   <div
     className="px-4 py-3.5"
     style={{
-      borderBottom: noDivider ? 'none' : '1px solid rgba(255,255,255,0.05)',
+      borderBottom: noDivider ? 'none' : '1px solid var(--divider)',
     }}
   >
     {children}
@@ -165,24 +167,24 @@ const KnownDeviceRow = ({
   const [confirming, setConfirming] = useState(false);
 
   return (
-    <div className="px-4 py-3 flex items-center gap-3" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+    <div className="px-4 py-3 flex items-center gap-3" style={{ borderBottom: '1px solid var(--divider)' }}>
       {/* Avatar */}
       <div
         className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 text-sm font-bold"
         style={{
-          background: 'rgba(99,102,241,0.12)',
-          border: '1px solid rgba(99,102,241,0.2)',
-          color: '#a78bfa',
+          background: 'var(--accent-soft-bg)',
+          border: '1px solid var(--accent-soft-br)',
+          color: 'var(--accent-primary)',
         }}
       >
         {device.name.charAt(0).toUpperCase()}
       </div>
 
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium truncate" style={{ color: 'rgba(255,255,255,0.75)' }}>
+        <p className="text-sm font-medium truncate" style={{ color: 'var(--text-secondary)' }}>
           {device.name}
         </p>
-        <p className="text-[10px] font-mono truncate" style={{ color: 'rgba(255,255,255,0.25)' }}>
+        <p className="text-[10px] font-mono truncate" style={{ color: 'var(--text-faint)' }}>
           {device.addr}
         </p>
       </div>
@@ -200,14 +202,14 @@ const KnownDeviceRow = ({
               <button
                 onClick={() => setConfirming(false)}
                 className="text-xs px-2 py-1 rounded-lg transition-all"
-                style={{ color: 'rgba(255,255,255,0.35)', background: 'rgba(255,255,255,0.06)' }}
+                style={{ color: 'var(--text-muted)', background: 'var(--bg-subtle)' }}
               >
                 Keep
               </button>
               <button
                 onClick={() => onForget(device.id)}
                 className="text-xs px-2 py-1 rounded-lg transition-all font-semibold"
-                style={{ color: '#f87171', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.2)' }}
+                style={{ color: 'var(--danger)', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.28)' }}
               >
                 Forget
               </button>
@@ -220,7 +222,7 @@ const KnownDeviceRow = ({
               exit={{ opacity: 0 }}
               onClick={() => setConfirming(true)}
               className="w-7 h-7 rounded-lg flex items-center justify-center transition-all"
-              style={{ color: 'rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.04)' }}
+              style={{ color: 'var(--text-ghost)', background: 'var(--bg-subtle)' }}
               title="Forget device"
             >
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -359,10 +361,12 @@ export const SettingsPage = () => {
   };
 
   return (
-    <div className="flex flex-col flex-1 overflow-y-auto px-3 py-3 gap-4 pb-2">
+    <div className="flex flex-col flex-1 overflow-y-auto px-5 py-4 gap-4 pb-3">
+
+      {/* Two-column grid: short sections flow side-by-side at wider widths */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
       {/* ── General ── */}
-      {/* TODO: full light-theme requires per-component refactor */}
       <Section
         title="General"
         icon={
@@ -390,16 +394,16 @@ export const SettingsPage = () => {
         <Row noDivider>
           <div className="flex items-center justify-between gap-4">
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium" style={{ color: 'rgba(255,255,255,0.78)' }}>Theme</p>
-              <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'rgba(255,255,255,0.28)' }}>
-                Light mode is limited in this version
+              <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>Theme</p>
+              <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
+                Switch between the default dark chrome and a bright VSCode-style light palette
               </p>
             </div>
             <div
               className="flex items-center rounded-xl p-0.5 flex-shrink-0"
               style={{
-                background: 'rgba(255,255,255,0.05)',
-                border: '1px solid rgba(255,255,255,0.08)',
+                background: 'var(--bg-subtle)',
+                border: '1px solid var(--border-subtle)',
               }}
             >
               {(['dark', 'light'] as const).map((t) => {
@@ -410,7 +414,7 @@ export const SettingsPage = () => {
                     onClick={() => update({ theme: t })}
                     className="relative px-3 py-1 text-xs font-semibold transition-colors"
                     style={{
-                      color: active ? 'white' : 'rgba(255,255,255,0.42)',
+                      color: active ? 'white' : 'var(--text-muted)',
                     }}
                   >
                     {active && (
@@ -446,19 +450,19 @@ export const SettingsPage = () => {
         <Row noDivider>
           <div className="flex items-start justify-between gap-4 mb-2">
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium" style={{ color: 'rgba(255,255,255,0.78)' }}>
+              <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
                 Idle auto-lock
               </p>
-              <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'rgba(255,255,255,0.28)' }}>
+              <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
                 Drop remote control after a period of inactivity
               </p>
             </div>
             <span
               className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg flex-shrink-0"
               style={{
-                background: 'rgba(99,102,241,0.1)',
-                border: '1px solid rgba(99,102,241,0.22)',
-                color: '#a78bfa',
+                background: 'var(--accent-soft-bg)',
+                border: '1px solid var(--accent-soft-br)',
+                color: 'var(--accent-primary)',
               }}
             >
               {(settings.idle_lock_minutes ?? 0) === 0
@@ -469,8 +473,8 @@ export const SettingsPage = () => {
           <div
             className="flex items-center rounded-xl p-0.5 flex-wrap gap-0.5"
             style={{
-              background: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.08)',
+              background: 'var(--bg-subtle)',
+              border: '1px solid var(--border-subtle)',
             }}
           >
             {[0, 5, 10, 15, 30, 60].map((mins) => {
@@ -480,7 +484,7 @@ export const SettingsPage = () => {
                   key={mins}
                   onClick={() => update({ idle_lock_minutes: mins })}
                   className="relative flex-1 px-2 py-1 text-[11px] font-semibold transition-colors"
-                  style={{ color: active ? 'white' : 'rgba(255,255,255,0.42)', minWidth: 38 }}
+                  style={{ color: active ? 'white' : 'var(--text-muted)', minWidth: 38 }}
                 >
                   {active && (
                     <motion.div
@@ -513,19 +517,19 @@ export const SettingsPage = () => {
         <Row noDivider>
           <div className="flex items-start justify-between gap-4 mb-3">
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium" style={{ color: 'rgba(255,255,255,0.78)' }}>
+              <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
                 Edge dwell time
               </p>
-              <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'rgba(255,255,255,0.28)' }}>
+              <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
                 Time to hold cursor at edge before switching
               </p>
             </div>
             <span
               className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg flex-shrink-0"
               style={{
-                background: 'rgba(99,102,241,0.1)',
-                border: '1px solid rgba(99,102,241,0.22)',
-                color: '#a78bfa',
+                background: 'var(--accent-soft-bg)',
+                border: '1px solid var(--accent-soft-br)',
+                color: 'var(--accent-primary)',
               }}
             >
               {settings.edge_dwell_ms ?? 150} ms
@@ -539,9 +543,9 @@ export const SettingsPage = () => {
             value={settings.edge_dwell_ms ?? 150}
             onChange={(e) => update({ edge_dwell_ms: Number(e.target.value) })}
             className="w-full accent-indigo-400"
-            style={{ accentColor: '#a78bfa' }}
+            style={{ accentColor: 'var(--accent-primary)' }}
           />
-          <div className="flex justify-between mt-1 text-[10px]" style={{ color: 'rgba(255,255,255,0.25)' }}>
+          <div className="flex justify-between mt-1 text-[10px]" style={{ color: 'var(--text-faint)' }}>
             <span>50 ms</span>
             <span>500 ms</span>
           </div>
@@ -560,19 +564,19 @@ export const SettingsPage = () => {
         <Row noDivider>
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-sm font-medium" style={{ color: 'rgba(255,255,255,0.78)' }}>
+              <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
                 Return cursor to this machine
               </p>
-              <p className="text-[11px] mt-0.5" style={{ color: 'rgba(255,255,255,0.28)' }}>
+              <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
                 Tap Ctrl twice quickly to release control
               </p>
             </div>
             <kbd
               className="px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex-shrink-0"
               style={{
-                background: 'rgba(99,102,241,0.1)',
-                border: '1px solid rgba(99,102,241,0.22)',
-                color: '#a78bfa',
+                background: 'var(--accent-soft-bg)',
+                border: '1px solid var(--accent-soft-br)',
+                color: 'var(--accent-primary)',
                 boxShadow: '0 2px 6px rgba(99,102,241,0.15)',
               }}
             >
@@ -593,7 +597,7 @@ export const SettingsPage = () => {
         }
       >
         <Row noDivider>
-          <p className="text-[11px] mb-2.5 leading-relaxed" style={{ color: 'rgba(255,255,255,0.35)' }}>
+          <p className="text-[11px] mb-2.5 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
             Self-host the relay binary and paste its address here to connect over the internet without being on the same Wi-Fi.
           </p>
           <input
@@ -605,9 +609,9 @@ export const SettingsPage = () => {
             placeholder="relay.yourserver.com:57173"
             className="w-full rounded-xl px-3 py-2.5 text-xs font-mono focus:outline-none transition-all"
             style={{
-              background: 'rgba(255,255,255,0.05)',
-              border: `1.5px solid ${relayInput ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.08)'}`,
-              color: 'rgba(255,255,255,0.65)',
+              background: 'var(--bg-input)',
+              border: `1.5px solid ${relayInput ? 'var(--border-strong)' : 'var(--border-subtle)'}`,
+              color: 'var(--text-secondary)',
             }}
           />
         </Row>
@@ -616,6 +620,7 @@ export const SettingsPage = () => {
       {/* ── Paired Devices ── */}
       <Section
         title={`Paired Devices${knownDevices.length > 0 ? ` · ${knownDevices.length}` : ''}`}
+        className="lg:col-span-2"
         icon={
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round"
@@ -625,12 +630,12 @@ export const SettingsPage = () => {
       >
         {knownDevices.length === 0 ? (
           <div className="px-4 py-5 flex flex-col items-center gap-1.5">
-            <svg className="w-7 h-7 mb-1" fill="none" viewBox="0 0 24 24" stroke="rgba(255,255,255,0.15)" strokeWidth={1.5}>
+            <svg className="w-7 h-7 mb-1" fill="none" viewBox="0 0 24 24" stroke="var(--text-ghost)" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round"
                 d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
             </svg>
-            <p className="text-xs" style={{ color: 'rgba(255,255,255,0.25)' }}>No paired devices yet</p>
-            <p className="text-[10px] text-center" style={{ color: 'rgba(255,255,255,0.15)' }}>
+            <p className="text-xs" style={{ color: 'var(--text-faint)' }}>No paired devices yet</p>
+            <p className="text-[10px] text-center" style={{ color: 'var(--text-ghost)' }}>
               Accept a connection request to pair a device — it'll auto-connect without a PIN next time.
             </p>
           </div>
@@ -649,7 +654,7 @@ export const SettingsPage = () => {
               ))}
             </AnimatePresence>
             <div className="px-4 py-2.5">
-              <p className="text-[10px]" style={{ color: 'rgba(255,255,255,0.2)' }}>
+              <p className="text-[10px]" style={{ color: 'var(--text-ghost)' }}>
                 Paired devices reconnect automatically without a PIN.
               </p>
             </div>
@@ -661,6 +666,7 @@ export const SettingsPage = () => {
       {connectedPeer && (
         <Section
           title="Session Stats"
+          className="lg:col-span-2"
           icon={
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round"
@@ -669,10 +675,10 @@ export const SettingsPage = () => {
           }
         >
           <Row>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {[
-                { label: 'Sent', value: formatBytes(bandwidth?.bytes_sent ?? 0), color: '#a78bfa' },
-                { label: 'Received', value: formatBytes(bandwidth?.bytes_received ?? 0), color: '#34d399' },
+                { label: 'Sent', value: formatBytes(bandwidth?.bytes_sent ?? 0), color: 'var(--accent-primary)' },
+                { label: 'Received', value: formatBytes(bandwidth?.bytes_received ?? 0), color: 'var(--success)' },
                 {
                   label: 'Total',
                   value: formatBytes(
@@ -684,15 +690,15 @@ export const SettingsPage = () => {
               ].map((tile) => (
                 <div
                   key={tile.label}
-                  className="rounded-xl px-3 py-2.5"
+                  className="rounded-xl px-4 py-3"
                   style={{
-                    background: 'rgba(255,255,255,0.04)',
-                    border: '1px solid rgba(255,255,255,0.06)',
+                    background: 'var(--bg-subtle)',
+                    border: '1px solid var(--border-subtle)',
                   }}
                 >
                   <p
-                    className="text-[10px] font-bold uppercase tracking-widest mb-1"
-                    style={{ color: 'rgba(255,255,255,0.32)' }}
+                    className="text-[10px] font-bold uppercase tracking-widest mb-1.5"
+                    style={{ color: 'var(--text-muted)' }}
                   >
                     {tile.label}
                   </p>
@@ -709,13 +715,13 @@ export const SettingsPage = () => {
           <Row noDivider>
             <p
               className="text-[10px] font-bold uppercase tracking-widest mb-1.5"
-              style={{ color: 'rgba(255,255,255,0.32)' }}
+              style={{ color: 'var(--text-faint)' }}
             >
               Ratio
             </p>
             <div
               className="w-full h-2 rounded-full overflow-hidden flex"
-              style={{ background: 'rgba(255,255,255,0.05)' }}
+              style={{ background: 'var(--bg-subtle)' }}
             >
               <div
                 className="h-full transition-all"
@@ -732,7 +738,7 @@ export const SettingsPage = () => {
                 }}
               />
             </div>
-            <div className="flex justify-between mt-1 text-[10px]" style={{ color: 'rgba(255,255,255,0.32)' }}>
+            <div className="flex justify-between mt-1 text-[10px]" style={{ color: 'var(--text-faint)' }}>
               <span>Sent</span>
               <span>Received</span>
             </div>
@@ -743,6 +749,7 @@ export const SettingsPage = () => {
       {/* ── Activity Log ── */}
       <Section
         title="Activity Log"
+        className="lg:col-span-2"
         icon={
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round"
@@ -752,11 +759,11 @@ export const SettingsPage = () => {
       >
         {recentAudit.length === 0 ? (
           <div className="px-4 py-5 flex flex-col items-center gap-1.5">
-            <svg className="w-7 h-7 mb-1" fill="none" viewBox="0 0 24 24" stroke="rgba(255,255,255,0.15)" strokeWidth={1.5}>
+            <svg className="w-7 h-7 mb-1" fill="none" viewBox="0 0 24 24" stroke="var(--text-ghost)" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round"
                 d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <p className="text-xs" style={{ color: 'rgba(255,255,255,0.25)' }}>
+            <p className="text-xs" style={{ color: 'var(--text-faint)' }}>
               {auditLoading ? 'Loading…' : 'No activity yet'}
             </p>
           </div>
@@ -771,7 +778,7 @@ export const SettingsPage = () => {
                     borderBottom:
                       idx === recentAudit.length - 1
                         ? 'none'
-                        : '1px solid rgba(255,255,255,0.05)',
+                        : '1px solid var(--divider)',
                   }}
                 >
                   <span
@@ -780,25 +787,25 @@ export const SettingsPage = () => {
                     aria-label={auditDotEmoji(entry.action)}
                   />
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium truncate" style={{ color: 'rgba(255,255,255,0.75)' }}>
+                    <p className="text-xs font-medium truncate" style={{ color: 'var(--text-secondary)' }}>
                       {entry.peer_name || 'Unknown device'}
-                      <span className="mx-1.5" style={{ color: 'rgba(255,255,255,0.28)' }}>·</span>
-                      <span style={{ color: 'rgba(255,255,255,0.5)' }}>{auditLabel(entry.action)}</span>
+                      <span className="mx-1.5" style={{ color: 'var(--text-faint)' }}>·</span>
+                      <span style={{ color: 'var(--text-muted)' }}>{auditLabel(entry.action)}</span>
                     </p>
                     {entry.details && (
-                      <p className="text-[10px] mt-0.5 truncate" style={{ color: 'rgba(255,255,255,0.3)' }}>
+                      <p className="text-[10px] mt-0.5 truncate" style={{ color: 'var(--text-faint)' }}>
                         {entry.details}
                       </p>
                     )}
                   </div>
-                  <span className="text-[10px] flex-shrink-0" style={{ color: 'rgba(255,255,255,0.32)' }}>
+                  <span className="text-[10px] flex-shrink-0" style={{ color: 'var(--text-faint)' }}>
                     {formatRelativeTime(entry.timestamp)}
                   </span>
                 </div>
               ))}
             </div>
-            <div className="px-4 py-2.5 flex items-center justify-between gap-2" style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-              <p className="text-[10px]" style={{ color: 'rgba(255,255,255,0.25)' }}>
+            <div className="px-4 py-2.5 flex items-center justify-between gap-2" style={{ borderTop: '1px solid var(--divider)' }}>
+              <p className="text-[10px]" style={{ color: 'var(--text-faint)' }}>
                 Most recent {recentAudit.length} {recentAudit.length === 1 ? 'event' : 'events'}
               </p>
               <AnimatePresence mode="wait">
@@ -813,7 +820,7 @@ export const SettingsPage = () => {
                     <button
                       onClick={() => setConfirmClearAudit(false)}
                       className="text-xs px-2 py-1 rounded-lg transition-all"
-                      style={{ color: 'rgba(255,255,255,0.45)', background: 'rgba(255,255,255,0.06)' }}
+                      style={{ color: 'var(--text-muted)', background: 'var(--bg-subtle)' }}
                     >
                       Cancel
                     </button>
@@ -838,9 +845,9 @@ export const SettingsPage = () => {
                     onClick={() => setConfirmClearAudit(true)}
                     className="text-xs px-2 py-1 rounded-lg transition-all"
                     style={{
-                      color: 'rgba(255,255,255,0.45)',
-                      background: 'rgba(255,255,255,0.04)',
-                      border: '1px solid rgba(255,255,255,0.08)',
+                      color: 'var(--text-muted)',
+                      background: 'var(--bg-subtle)',
+                      border: '1px solid var(--border-subtle)',
                     }}
                   >
                     Clear log
@@ -855,6 +862,7 @@ export const SettingsPage = () => {
       {/* ── About ── */}
       <Section
         title="About"
+        className="lg:col-span-2"
         icon={
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -864,8 +872,8 @@ export const SettingsPage = () => {
         <Row>
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold text-white">MultiMouse</p>
-              <p className="text-[11px] mt-0.5" style={{ color: 'rgba(255,255,255,0.3)' }}>
+              <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>MultiMouse</p>
+              <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
                 v0.1.0 · {status?.device_name ?? '—'}
               </p>
             </div>
@@ -874,9 +882,9 @@ export const SettingsPage = () => {
               disabled={checkingUpdate}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-50 flex-shrink-0"
               style={{
-                background: 'rgba(99,102,241,0.1)',
-                border: '1px solid rgba(99,102,241,0.22)',
-                color: '#a78bfa',
+                background: 'var(--accent-soft-bg)',
+                border: '1px solid var(--accent-soft-br)',
+                color: 'var(--accent-primary)',
               }}
             >
               {checkingUpdate ? (
@@ -908,7 +916,7 @@ export const SettingsPage = () => {
                 animate={{ opacity: 1, height: 'auto' }}
                 exit={{ opacity: 0, height: 0 }}
                 className="text-[11px] mt-2.5 leading-relaxed"
-                style={{ color: updateOk ? '#34d399' : '#a78bfa' }}
+                style={{ color: updateOk ? 'var(--success)' : 'var(--accent-primary)' }}
               >
                 {updateMsg}
               </motion.p>
@@ -916,12 +924,13 @@ export const SettingsPage = () => {
           </AnimatePresence>
         </Row>
         <Row noDivider>
-          <p className="text-[11px] leading-relaxed" style={{ color: 'rgba(255,255,255,0.22)' }}>
+          <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-faint)' }}>
             Share mouse and keyboard seamlessly across Mac, Windows, and Linux. Move the cursor to the configured screen edge to switch between computers.
           </p>
         </Row>
       </Section>
 
+      </div>
     </div>
   );
 };

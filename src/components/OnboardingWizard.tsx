@@ -74,19 +74,16 @@ const PairingVisual = () => (
         key={i}
         className="rounded-2xl px-4 py-3 flex flex-col items-center gap-1.5"
         style={{
-          background: 'rgba(99,102,241,0.1)',
-          border: '1px solid rgba(99,102,241,0.25)',
+          background: 'var(--accent-soft-bg)',
+          border: '1px solid var(--accent-soft-br)',
         }}
       >
-        <p className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'rgba(167,139,250,0.65)' }}>
+        <p className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--accent-muted)' }}>
           Device {i + 1}
         </p>
         <p
           className="font-mono font-bold tracking-[0.25em] text-xl"
-          style={{
-            color: 'white',
-            textShadow: '0 2px 8px rgba(99,102,241,0.4)',
-          }}
+          style={{ color: 'var(--text-primary)' }}
         >
           482-391
         </p>
@@ -96,14 +93,18 @@ const PairingVisual = () => (
 );
 
 const PermissionsGuidance = ({ platform }: { platform: Platform }) => {
+  const bodyStyle = { color: 'var(--text-secondary)' } as const;
+  const mutedStyle = { color: 'var(--text-muted)' } as const;
+  const emphStyle = { color: 'var(--text-primary)' } as const;
+
   if (platform === 'macos') {
     return (
       <>
-        <p className="text-sm leading-relaxed text-center" style={{ color: 'rgba(255,255,255,0.7)' }}>
-          MultiMouse needs <span className="font-semibold text-white">Accessibility</span> permission
+        <p className="text-sm leading-relaxed text-center" style={bodyStyle}>
+          MultiMouse needs <span className="font-semibold" style={emphStyle}>Accessibility</span> permission
           to forward mouse and keyboard events.
         </p>
-        <p className="text-[11px] mt-2 text-center leading-relaxed" style={{ color: 'rgba(255,255,255,0.4)' }}>
+        <p className="text-[11px] mt-2 text-center leading-relaxed" style={mutedStyle}>
           System Settings → Privacy &amp; Security → Accessibility → enable MultiMouse
         </p>
       </>
@@ -112,11 +113,11 @@ const PermissionsGuidance = ({ platform }: { platform: Platform }) => {
   if (platform === 'windows') {
     return (
       <>
-        <p className="text-sm leading-relaxed text-center" style={{ color: 'rgba(255,255,255,0.7)' }}>
-          On Windows, MultiMouse may prompt for <span className="font-semibold text-white">UAC elevation</span> to
+        <p className="text-sm leading-relaxed text-center" style={bodyStyle}>
+          On Windows, MultiMouse may prompt for <span className="font-semibold" style={emphStyle}>UAC elevation</span> to
           inject input into elevated apps.
         </p>
-        <p className="text-[11px] mt-2 text-center leading-relaxed" style={{ color: 'rgba(255,255,255,0.4)' }}>
+        <p className="text-[11px] mt-2 text-center leading-relaxed" style={mutedStyle}>
           Accept the prompt when it appears. Firewall: allow local network access.
         </p>
       </>
@@ -125,11 +126,11 @@ const PermissionsGuidance = ({ platform }: { platform: Platform }) => {
   if (platform === 'linux') {
     return (
       <>
-        <p className="text-sm leading-relaxed text-center" style={{ color: 'rgba(255,255,255,0.7)' }}>
-          On Linux, MultiMouse requires access to <span className="font-semibold text-white">uinput</span> or
+        <p className="text-sm leading-relaxed text-center" style={bodyStyle}>
+          On Linux, MultiMouse requires access to <span className="font-semibold" style={emphStyle}>uinput</span> or
           X11 input.
         </p>
-        <p className="text-[11px] mt-2 text-center leading-relaxed" style={{ color: 'rgba(255,255,255,0.4)' }}>
+        <p className="text-[11px] mt-2 text-center leading-relaxed" style={mutedStyle}>
           You may need to add your user to the <span className="font-mono">input</span> group
           and re-login, or run with appropriate permissions.
         </p>
@@ -138,10 +139,10 @@ const PermissionsGuidance = ({ platform }: { platform: Platform }) => {
   }
   return (
     <>
-      <p className="text-sm leading-relaxed text-center" style={{ color: 'rgba(255,255,255,0.7)' }}>
+      <p className="text-sm leading-relaxed text-center" style={bodyStyle}>
         MultiMouse needs permission to capture mouse &amp; keyboard input and forward it to other devices.
       </p>
-      <p className="text-[11px] mt-2 text-center leading-relaxed" style={{ color: 'rgba(255,255,255,0.4)' }}>
+      <p className="text-[11px] mt-2 text-center leading-relaxed" style={mutedStyle}>
         If prompted, allow accessibility / input access in your OS settings.
       </p>
     </>
@@ -279,7 +280,7 @@ export const OnboardingWizard = () => {
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-[60] flex items-center justify-center"
       style={{
-        background: 'rgba(6,6,16,0.85)',
+        background: 'var(--bg-overlay)',
         backdropFilter: 'blur(14px)',
         borderRadius: '18px',
       }}
@@ -287,9 +288,9 @@ export const OnboardingWizard = () => {
       <div
         className="relative flex flex-col w-[calc(100%-32px)] max-w-[380px] rounded-3xl overflow-hidden"
         style={{
-          background: 'linear-gradient(160deg, rgba(22,20,50,0.98) 0%, rgba(16,14,38,0.98) 100%)',
-          border: '1px solid rgba(99,102,241,0.22)',
-          boxShadow: '0 24px 64px rgba(0,0,0,0.65)',
+          background: 'var(--bg-card-strong)',
+          border: '1px solid var(--border)',
+          boxShadow: 'var(--shadow-hero)',
         }}
       >
         {/* Skip link (slides 1-3) */}
@@ -297,7 +298,7 @@ export const OnboardingWizard = () => {
           <button
             onClick={finish}
             className="absolute top-3 right-3 text-[11px] font-medium transition-colors z-10"
-            style={{ color: 'rgba(255,255,255,0.35)' }}
+            style={{ color: 'var(--text-muted)' }}
           >
             Skip
           </button>
@@ -315,13 +316,13 @@ export const OnboardingWizard = () => {
               transition={{ duration: 0.28, ease: 'easeOut' }}
               className="px-6 pt-10 pb-4 flex flex-col items-center"
             >
-              <h2 className="text-lg font-bold text-white text-center mb-1.5 leading-tight">
+              <h2 className="text-lg font-bold text-center mb-1.5 leading-tight" style={{ color: 'var(--text-primary)' }}>
                 {slide.title}
               </h2>
               {slide.subtitle && (
                 <p
                   className="text-xs text-center leading-relaxed mb-4 max-w-[300px]"
-                  style={{ color: 'rgba(255,255,255,0.55)' }}
+                  style={{ color: 'var(--text-body)' }}
                 >
                   {slide.subtitle}
                 </p>
@@ -332,16 +333,16 @@ export const OnboardingWizard = () => {
         </div>
 
         {/* Controls */}
-        <div className="flex items-center justify-between px-5 py-4" style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderTop: '1px solid var(--divider)' }}>
           {/* Back */}
           <button
             onClick={goBack}
             disabled={index === 0}
             className="w-9 h-9 rounded-xl flex items-center justify-center transition-all disabled:opacity-30"
             style={{
-              background: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.08)',
-              color: 'rgba(255,255,255,0.6)',
+              background: 'var(--bg-subtle)',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-body)',
             }}
             aria-label="Back"
           >
@@ -362,7 +363,7 @@ export const OnboardingWizard = () => {
                 transition={{ type: 'spring', stiffness: 420, damping: 30 }}
                 className="h-1.5 rounded-full"
                 style={{
-                  background: i === index ? 'linear-gradient(90deg, #6366f1, #a855f7)' : 'rgba(255,255,255,0.35)',
+                  background: i === index ? 'linear-gradient(90deg, #6366f1, #a855f7)' : 'var(--text-faint)',
                 }}
               />
             ))}

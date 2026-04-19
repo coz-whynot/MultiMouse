@@ -66,18 +66,18 @@ export const TrackpadCard = () => {
   return (
     <div
       className="rounded-2xl p-4"
-      style={{ background: 'rgba(255,255,255,0.035)', border: '1px solid rgba(255,255,255,0.07)' }}
+      style={{ background: 'var(--bg-subtle-2)', border: '1px solid var(--border-subtle)' }}
     >
       <div className="flex items-center justify-between mb-3">
-        <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: 'rgba(255,255,255,0.35)' }}>
+        <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>
           Phone Trackpad
         </p>
         {info && (
           <span
             className="text-[10px] font-bold px-2 py-0.5 rounded-full"
             style={{
-              background: clients > 0 ? 'rgba(52,211,153,0.15)' : 'rgba(255,255,255,0.05)',
-              color: clients > 0 ? '#34d399' : 'rgba(255,255,255,0.4)',
+              background: clients > 0 ? 'rgba(52,211,153,0.15)' : 'var(--bg-subtle)',
+              color: clients > 0 ? 'var(--success)' : 'var(--text-muted)',
             }}
           >
             {clients > 0 ? `${clients} connected` : 'Waiting for phone'}
@@ -88,11 +88,11 @@ export const TrackpadCard = () => {
       <AnimatePresence mode="wait">
         {!info ? (
           <motion.div key="off" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <p className="text-[11px] leading-relaxed mb-3" style={{ color: 'rgba(255,255,255,0.45)' }}>
+            <p className="text-[11px] leading-relaxed mb-3" style={{ color: 'var(--text-muted)' }}>
               Turn your phone into a trackpad for this computer. Scan the QR code from any phone on the same Wi-Fi — no app install needed.
             </p>
             {err && (
-              <p className="text-[11px] mb-2" style={{ color: '#f87171' }}>{err}</p>
+              <p className="text-[11px] mb-2" style={{ color: 'var(--danger)' }}>{err}</p>
             )}
             <button
               onClick={start}
@@ -101,7 +101,7 @@ export const TrackpadCard = () => {
               style={{
                 background: 'rgba(99,102,241,0.14)',
                 border: '1.5px solid rgba(99,102,241,0.3)',
-                color: '#a78bfa',
+                color: 'var(--accent-primary)',
               }}
             >
               {busy ? 'Starting…' : 'Enable Phone Trackpad'}
@@ -110,21 +110,23 @@ export const TrackpadCard = () => {
         ) : (
           <motion.div key="on" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
             <div className="flex gap-3 items-stretch">
+              {/* QR background stays white across themes so camera apps can
+                  reliably read it — the SVG inside is dark. */}
               <div
                 className="flex-shrink-0 rounded-xl p-1.5 flex items-center justify-center"
-                style={{ background: '#0b0b18', border: '1px solid rgba(255,255,255,0.08)', width: 128, height: 128 }}
+                style={{ background: '#ffffff', border: '1px solid var(--border-subtle)', width: 128, height: 128 }}
                 dangerouslySetInnerHTML={{ __html: info.qr_svg }}
               />
               <div className="flex-1 min-w-0 flex flex-col justify-between">
                 <div>
-                  <p className="text-[10px] uppercase tracking-widest" style={{ color: 'rgba(255,255,255,0.35)' }}>
+                  <p className="text-[10px] uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>
                     Scan or visit
                   </p>
                   <p
                     className="text-[11px] font-mono mt-1 break-all cursor-pointer"
                     onClick={copy}
                     title="Click to copy"
-                    style={{ color: 'rgba(255,255,255,0.7)' }}
+                    style={{ color: 'var(--text-secondary)' }}
                   >
                     {info.url.replace(/^https?:\/\//, '')}
                   </p>
@@ -133,9 +135,9 @@ export const TrackpadCard = () => {
                   onClick={copy}
                   className="mt-2 py-1.5 rounded-lg text-[10px] font-semibold transition-all active:scale-95"
                   style={{
-                    background: 'rgba(255,255,255,0.06)',
-                    border: '1px solid rgba(255,255,255,0.08)',
-                    color: 'rgba(255,255,255,0.55)',
+                    background: 'var(--bg-subtle)',
+                    border: '1px solid var(--border-subtle)',
+                    color: 'var(--text-body)',
                   }}
                 >
                   Copy link
@@ -148,9 +150,9 @@ export const TrackpadCard = () => {
               disabled={busy}
               className="w-full mt-3 py-2 rounded-xl text-[11px] font-semibold transition-all active:scale-[0.97] disabled:opacity-50"
               style={{
-                background: 'rgba(248,113,113,0.08)',
-                border: '1px solid rgba(248,113,113,0.22)',
-                color: 'rgba(248,113,113,0.85)',
+                background: 'rgba(248,113,113,0.1)',
+                border: '1px solid rgba(248,113,113,0.28)',
+                color: 'var(--danger)',
               }}
             >
               Stop trackpad server

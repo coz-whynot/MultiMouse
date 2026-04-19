@@ -190,11 +190,13 @@ export default function App() {
 
   const connectedPeer = status?.connected_peer != null;
   const theme = settings?.theme === 'light' ? 'light' : 'dark';
-  const rootBackground =
-    theme === 'light'
-      ? 'linear-gradient(160deg, #f8fafc 0%, #ede9fe 45%, #e0e7ff 100%)'
-      : 'linear-gradient(160deg, #0f0c29 0%, #1a0d4a 45%, #0d1535 100%)';
-  const rootBorder = theme === 'light' ? '1px solid rgba(99,102,241,0.22)' : '1px solid rgba(99,102,241,0.16)';
+  const isLight = theme === 'light';
+  // Use the shared gradient token so App-level background matches the rest
+  // of the UI whenever we introduce new themes later.
+  const rootBackground = isLight
+    ? 'linear-gradient(160deg, #f8fafc 0%, #eef2ff 45%, #e0e7ff 100%)'
+    : 'linear-gradient(160deg, #0f0c29 0%, #1a0d4a 45%, #0d1535 100%)';
+  const rootBorder = isLight ? '1px solid rgba(79,70,229,0.22)' : '1px solid rgba(99,102,241,0.16)';
 
   // FEATURE 2: Privacy blur while we're actively controlling a peer.
   // TODO: expose a `privacy_blur_on_relay` setting once the backend adds it.
@@ -248,10 +250,6 @@ export default function App() {
     >
       <TitleBar />
 
-      {/* Content column — stays at a readable width even when the window is wide,
-          so cards don't stretch edge-to-edge and feel cramped. */}
-      <div className="flex flex-col flex-1 overflow-hidden mx-auto w-full max-w-[520px] px-1">
-
       {/* Reconnect banner */}
       <AnimatePresence>
         {reconnectState && (
@@ -259,7 +257,7 @@ export default function App() {
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="mx-3 mt-1 overflow-hidden"
+            className="mx-5 mt-1 overflow-hidden"
           >
             <div
               className="rounded-xl px-3 py-2.5 flex items-center gap-2.5 mb-1"
@@ -326,7 +324,7 @@ export default function App() {
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="mx-3 mt-1 overflow-hidden"
+            className="mx-5 mt-1 overflow-hidden"
           >
             <div
               className="rounded-xl px-3 py-2.5 flex items-center gap-2.5 mb-1"
@@ -376,17 +374,17 @@ export default function App() {
                 animate={{ y: [0, -8, 0] }}
                 transition={{ repeat: Infinity, duration: 1.3, ease: 'easeInOut' }}
               >
-                <svg className="w-14 h-14" fill="none" viewBox="0 0 24 24" stroke="rgba(167,139,250,0.85)" strokeWidth={1.3}>
+                <svg className="w-14 h-14" fill="none" viewBox="0 0 24 24" stroke={isLight ? '#4f46e5' : 'rgba(167,139,250,0.85)'} strokeWidth={1.3}>
                   <path strokeLinecap="round" strokeLinejoin="round"
                     d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                 </svg>
               </motion.div>
               <div className="text-center">
-                <p className="text-sm font-bold" style={{ color: 'rgba(255,255,255,0.85)' }}>
+                <p className="text-sm font-bold" style={{ color: 'var(--text-strong)' }}>
                   {connectedPeer ? 'Drop to send' : 'No device connected'}
                 </p>
                 {connectedPeer && (
-                  <p className="text-xs mt-0.5" style={{ color: 'rgba(255,255,255,0.4)' }}>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
                     File will land in their Downloads folder
                   </p>
                 )}
@@ -455,20 +453,24 @@ export default function App() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               className="absolute inset-0 flex flex-col items-center justify-center px-6 z-30"
-              style={{ background: 'rgba(6,6,16,0.35)' }}
+              style={{ background: isLight ? 'rgba(30,27,75,0.18)' : 'rgba(6,6,16,0.35)' }}
             >
               <div
                 className="rounded-3xl px-5 py-4 flex flex-col items-center gap-3 max-w-[82%]"
                 style={{
-                  background: 'linear-gradient(160deg, rgba(22,20,50,0.92) 0%, rgba(16,14,38,0.92) 100%)',
-                  border: '1px solid rgba(99,102,241,0.3)',
-                  boxShadow: '0 18px 48px rgba(0,0,0,0.45)',
+                  background: isLight
+                    ? 'linear-gradient(160deg, rgba(255,255,255,0.97) 0%, rgba(238,242,255,0.95) 100%)'
+                    : 'linear-gradient(160deg, rgba(22,20,50,0.92) 0%, rgba(16,14,38,0.92) 100%)',
+                  border: `1px solid ${isLight ? 'rgba(79,70,229,0.32)' : 'rgba(99,102,241,0.3)'}`,
+                  boxShadow: isLight
+                    ? '0 18px 48px rgba(30,27,75,0.28)'
+                    : '0 18px 48px rgba(0,0,0,0.45)',
                 }}
               >
-                <p className="text-center text-sm font-semibold" style={{ color: 'rgba(255,255,255,0.92)' }}>
+                <p className="text-center text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>
                   🔒 Controlling {peerNameForBlur} — content hidden for privacy
                 </p>
-                <p className="text-center text-[11px]" style={{ color: 'rgba(255,255,255,0.48)' }}>
+                <p className="text-center text-[11px]" style={{ color: 'var(--text-muted)' }}>
                   Press ESC ESC, or use the button below, to return cursor to this machine.
                 </p>
                 <button
@@ -489,8 +491,6 @@ export default function App() {
       </div>
 
       <BottomNav current={currentPage as any} onChange={setPage as any} connectedPeer={connectedPeer} />
-
-      </div> {/* end centered content column */}
 
       {/* Pairing modal */}
       <AnimatePresence>
@@ -523,16 +523,18 @@ export default function App() {
             <div
               className="rounded-2xl px-4 py-2.5 flex items-center gap-2.5"
               style={{
-                background: 'rgba(22,20,50,0.96)',
-                border: '1px solid rgba(99,102,241,0.3)',
-                boxShadow: '0 18px 48px rgba(0,0,0,0.45)',
+                background: isLight ? 'rgba(255,255,255,0.96)' : 'rgba(22,20,50,0.96)',
+                border: `1px solid ${isLight ? 'rgba(79,70,229,0.3)' : 'rgba(99,102,241,0.3)'}`,
+                boxShadow: isLight
+                  ? '0 18px 48px rgba(30,27,75,0.22)'
+                  : '0 18px 48px rgba(0,0,0,0.45)',
               }}
             >
-              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="#a78bfa" strokeWidth={1.8}>
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="var(--accent-primary)" strokeWidth={1.8}>
                 <path strokeLinecap="round" strokeLinejoin="round"
                   d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
               </svg>
-              <p className="text-xs" style={{ color: 'rgba(255,255,255,0.85)' }}>{idleLockMsg}</p>
+              <p className="text-xs" style={{ color: 'var(--text-strong)' }}>{idleLockMsg}</p>
             </div>
           </motion.div>
         )}
@@ -546,7 +548,7 @@ export default function App() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 flex items-center justify-center z-50"
-            style={{ background: 'rgba(6,6,16,0.88)', backdropFilter: 'blur(16px)' }}
+            style={{ background: isLight ? 'rgba(30,27,75,0.5)' : 'rgba(6,6,16,0.88)', backdropFilter: 'blur(16px)' }}
           >
             <motion.div
               initial={{ scale: 0.88, opacity: 0, y: 12 }}
@@ -555,9 +557,13 @@ export default function App() {
               transition={{ type: 'spring', stiffness: 420, damping: 32 }}
               className="w-[280px] rounded-3xl p-6"
               style={{
-                background: 'linear-gradient(160deg, rgba(22,20,50,0.98) 0%, rgba(16,14,38,0.98) 100%)',
-                border: '1px solid rgba(99,102,241,0.2)',
-                boxShadow: '0 24px 64px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04) inset',
+                background: isLight
+                  ? 'linear-gradient(160deg, rgba(255,255,255,0.98) 0%, rgba(238,242,255,0.96) 100%)'
+                  : 'linear-gradient(160deg, rgba(22,20,50,0.98) 0%, rgba(16,14,38,0.98) 100%)',
+                border: `1px solid ${isLight ? 'rgba(79,70,229,0.22)' : 'rgba(99,102,241,0.2)'}`,
+                boxShadow: isLight
+                  ? '0 24px 64px rgba(30,27,75,0.24), 0 0 0 1px rgba(255,255,255,0.6) inset'
+                  : '0 24px 64px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04) inset',
               }}
             >
               <div className="flex flex-col items-center mb-4">
@@ -568,44 +574,47 @@ export default function App() {
                     border: '1px solid rgba(99,102,241,0.3)',
                   }}
                 >
-                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="rgba(167,139,250,0.9)" strokeWidth={1.8}>
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke={isLight ? '#4f46e5' : 'rgba(167,139,250,0.9)'} strokeWidth={1.8}>
                     <path strokeLinecap="round" strokeLinejoin="round"
                       d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
                   </svg>
                 </div>
                 <p
                   className="text-[11px] font-semibold uppercase tracking-widest mb-1"
-                  style={{ color: 'rgba(167,139,250,0.55)' }}
+                  style={{ color: 'var(--accent-muted)' }}
                 >
                   Pairing Link
                 </p>
-                <p className="text-white font-bold text-base leading-tight text-center">
+                <p className="font-bold text-base leading-tight text-center" style={{ color: 'var(--text-primary)' }}>
                   Accept pairing request?
                 </p>
               </div>
 
-              <p className="text-center text-[13px] mb-3 leading-relaxed" style={{ color: 'rgba(255,255,255,0.45)' }}>
+              <p className="text-center text-[13px] mb-3 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
                 Connect to{' '}
-                <span className="text-white/80 font-semibold font-mono">{incomingDeepLink.host}</span>
+                <span className="font-semibold font-mono" style={{ color: 'var(--text-strong)' }}>{incomingDeepLink.host}</span>
                 ?
               </p>
 
               <div
                 className="mb-4 rounded-2xl py-3 px-4"
                 style={{
-                  background: 'rgba(99,102,241,0.08)',
-                  border: '1px solid rgba(99,102,241,0.22)',
+                  background: 'var(--accent-soft-bg)',
+                  border: '1px solid var(--accent-soft-br)',
                 }}
               >
                 <p
                   className="text-center text-[10px] font-semibold uppercase tracking-widest mb-1.5"
-                  style={{ color: 'rgba(167,139,250,0.65)' }}
+                  style={{ color: 'var(--accent-muted)' }}
                 >
                   Pairing code
                 </p>
                 <p
-                  className="text-center text-white font-mono font-bold tracking-[0.3em] text-2xl"
-                  style={{ textShadow: '0 2px 8px rgba(99,102,241,0.4)' }}
+                  className="text-center font-mono font-bold tracking-[0.3em] text-2xl"
+                  style={{
+                    color: 'var(--text-primary)',
+                    textShadow: isLight ? 'none' : '0 2px 8px rgba(99,102,241,0.4)',
+                  }}
                 >
                   {incomingDeepLink.code}
                 </p>
@@ -616,9 +625,9 @@ export default function App() {
                   onClick={() => setIncomingDeepLink(null)}
                   className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-all active:scale-[0.97]"
                   style={{
-                    background: 'rgba(255,255,255,0.05)',
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    color: 'rgba(255,255,255,0.55)',
+                    background: 'var(--bg-subtle)',
+                    border: '1px solid var(--border-subtle)',
+                    color: 'var(--text-body)',
                   }}
                 >
                   Reject

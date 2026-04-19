@@ -1,10 +1,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { useStore } from '../store/useStore';
 
 export const TitleBar = () => {
   const close = () => getCurrentWindow().hide();
-  const theme = useStore((s) => (s.settings?.theme === 'light' ? 'light' : 'dark'));
-  const isLight = theme === 'light';
 
   return (
     <div
@@ -26,7 +23,7 @@ export const TitleBar = () => {
         </div>
         <span
           className="text-sm font-bold tracking-tight"
-          style={{ color: isLight ? '#1e1b4b' : '#ffffff' }}
+          style={{ color: 'var(--text-primary)' }}
         >
           MultiMouse
         </span>
@@ -36,18 +33,16 @@ export const TitleBar = () => {
         <button
           onClick={close}
           className="w-8 h-8 rounded-xl flex items-center justify-center transition-all"
-          style={{
-            color: isLight ? 'rgba(30,27,75,0.5)' : 'rgba(255,255,255,0.4)',
-          }}
+          style={{ color: 'var(--text-muted)' }}
           onMouseEnter={(e) => {
             (e.currentTarget as HTMLButtonElement).style.color = '#ef4444';
             (e.currentTarget as HTMLButtonElement).style.background = 'rgba(239,68,68,0.12)';
           }}
           onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.color = isLight
-              ? 'rgba(30,27,75,0.5)'
-              : 'rgba(255,255,255,0.4)';
+            (e.currentTarget as HTMLButtonElement).style.color = '';
+            // Clear inline color so it falls back to the var(--text-muted) stylesheet value.
             (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+            (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-muted)';
           }}
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

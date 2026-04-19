@@ -3,7 +3,6 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { PeerInfo } from '../types';
-import { useStore } from '../store/useStore';
 
 /* Rough emoji picker for an app-name heuristic. Extend as needed. */
 const appEmoji = (name: string): string => {
@@ -35,10 +34,10 @@ const LatencyPill = ({ ms }: { ms?: number | null }) => {
   let label: string;
 
   if (ms == null) {
-    dotColor = 'rgba(255,255,255,0.3)';
-    textColor = 'rgba(255,255,255,0.45)';
-    bg = 'rgba(255,255,255,0.06)';
-    border = 'rgba(255,255,255,0.1)';
+    dotColor = 'var(--text-faint)';
+    textColor = 'var(--text-muted)';
+    bg = 'var(--bg-subtle)';
+    border = 'var(--border-subtle)';
     label = '—';
   } else if (ms <= 30) {
     dotColor = '#34d399';
@@ -76,7 +75,8 @@ const LatencyPill = ({ ms }: { ms?: number | null }) => {
 };
 
 export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
-  const isLight = useStore((s) => s.settings?.theme === 'light');
+  // Theme-dependent colors come through CSS custom properties set on the
+  // root [data-theme] node, so we no longer need to branch per-theme here.
   const handleDisconnect = () => invoke('disconnect');
   const handleRelease = () => invoke('release_cursor');
 
@@ -109,7 +109,7 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -8, scale: 0.97 }}
           transition={{ type: 'spring', stiffness: 440, damping: 34 }}
-          className="mx-3 mb-3 rounded-2xl overflow-hidden"
+          className="mb-4 rounded-2xl overflow-hidden"
           style={{
             background: relaying
               ? 'linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(168,85,247,0.16) 100%)'
@@ -120,7 +120,7 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
               : '0 4px 20px rgba(16,185,129,0.08)',
           }}
         >
-          <div className="flex items-center gap-3 px-3.5 py-2.5">
+          <div className="flex items-center gap-3 px-5 py-3">
             {/* Status dot with clean pulse */}
             <div className="relative flex-shrink-0 w-3 h-3">
               <motion.div
@@ -140,7 +140,7 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
               <div className="flex items-center gap-2">
                 <p
                   className="text-sm font-semibold leading-tight truncate flex items-center gap-1.5"
-                  style={{ color: isLight ? '#1e1b4b' : '#ffffff' }}
+                  style={{ color: 'var(--text-primary)' }}
                 >
                   {relaying ? (
                     <AnimatePresence mode="wait" initial={false}>
@@ -177,7 +177,7 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
               </div>
               <p
                 className="text-[11px] mt-0.5"
-                style={{ color: isLight ? 'rgba(30,27,75,0.55)' : 'rgba(255,255,255,0.4)' }}
+                style={{ color: 'var(--text-muted)' }}
               >
                 {relaying
                   ? 'Forwarding input · Press ESC ESC to release'
@@ -192,9 +192,9 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
                 onClick={handleRelease}
                 className="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-all"
                 style={{
-                  background: relaying ? 'rgba(99,102,241,0.18)' : 'rgba(255,255,255,0.07)',
-                  color: relaying ? '#c7d2fe' : 'rgba(255,255,255,0.65)',
-                  border: `1px solid ${relaying ? 'rgba(99,102,241,0.32)' : 'rgba(255,255,255,0.1)'}`,
+                  background: relaying ? 'rgba(99,102,241,0.2)' : 'var(--bg-subtle)',
+                  color: relaying ? 'var(--accent-primary)' : 'var(--text-body)',
+                  border: `1px solid ${relaying ? 'var(--border-strong)' : 'var(--border-subtle)'}`,
                 }}
               >
                 Release
@@ -203,9 +203,9 @@ export const ConnectionBanner = ({ connectedPeer, relaying }: Props) => {
                 onClick={handleDisconnect}
                 className="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-all"
                 style={{
-                  background: 'rgba(239,68,68,0.1)',
-                  color: '#f87171',
-                  border: '1px solid rgba(239,68,68,0.18)',
+                  background: 'rgba(239,68,68,0.12)',
+                  color: 'var(--danger)',
+                  border: '1px solid rgba(239,68,68,0.28)',
                 }}
               >
                 End
