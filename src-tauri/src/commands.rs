@@ -89,20 +89,49 @@ pub async fn disconnect(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) 
 #[tauri::command]
 pub async fn release_cursor(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.set_relaying(false);
+    *state.relay_entry.lock() = None;
     state.send_net(NetCommand::FocusReleased);
+    // Warp the local cursor to the center of this screen so the user can see it
+    let monitors = state.monitors.read().clone();
+    let (min_x, min_y, max_x, max_y) = crate::screen::layout::virtual_bounds(&monitors);
+    crate::input::inject::warp_abs(
+        ((min_x + max_x) / 2.0) as i32,
+        ((min_y + max_y) / 2.0) as i32,
+    );
     Ok(())
 }
 
 #[tauri::command]
 pub async fn take_control(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    if state.connected_peer.lock().is_some() {
-        state.set_relaying(true);
-        state.send_net(NetCommand::FocusAcquired);
-        let _ = app.emit("relay-started", ());
-        Ok(())
-    } else {
-        Err("Not connected to any device".to_string())
+    if state.connected_peer.lock().is_none() {
+        return Err("Not connected to any device".to_string());
     }
+
+    // Center the local cursor on this machine so the OS can report real motion
+    // deltas (if it were at a screen edge, subsequent moves would be clamped).
+    let monitors = state.monitors.read().clone();
+    let (min_x, min_y, max_x, max_y) = crate::screen::layout::virtual_bounds(&monitors);
+    let center_x = (min_x + max_x) / 2.0;
+    let center_y = (min_y + max_y) / 2.0;
+    crate::input::inject::warp_abs(center_x as i32, center_y as i32);
+
+    // Place the remote cursor at the center of the remote screen too, and set
+    // up the delta anchor so subsequent mouse motion translates into coordinate
+    // updates in the remote's screen space.
+    let remote = *state.remote_screen.lock();
+    let (rw, rh) = remote.unwrap_or((max_x - min_x, max_y - min_y));
+    let rx = rw / 2.0;
+    let ry = rh / 2.0;
+
+    *state.relay_entry.lock() = Some((center_x, center_y, rx, ry));
+    state.set_relaying(true);
+    state.send_net(NetCommand::Input(
+        crate::network::protocol::InputEvent::MouseMove { x: rx, y: ry },
+    ));
+    state.send_net(NetCommand::FocusAcquired);
+    let _ = app.emit("relay-started", ());
+    let _ = app.emit("focus-acquired", ());
+    Ok(())
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
