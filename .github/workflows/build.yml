@@ -120,7 +120,13 @@ jobs:
             - **Linux**: `chmod +x MultiMouse_*.AppImage && ./MultiMouse_*.AppImage`
           releaseDraft: true
           prerelease: false
-          updaterJsonPreferNsis: true
+          # Don't let tauri-action try to assemble latest.json — it can't,
+          # because per-platform it only has one sig. Our publish-updater-json
+          # job handles that downstream. Crucially, setting this to false
+          # stops tauri-action from deleting .sig / .nsis.zip files after
+          # its own latest.json step fails, which was swallowing them on
+          # Windows before our re-sign/upload steps could run.
+          includeUpdaterJson: false
           args: --target ${{ matrix.target }}
 
       # On manual dispatch: just build, no release, no code signing
@@ -153,6 +159,8 @@ jobs:
         run: |
           set -eu
           BUNDLE="src-tauri/target/$TARGET/release/bundle"
+          echo "=== bundle tree (re-sign) ==="
+          ls -laR "$BUNDLE" 2>/dev/null || echo "bundle dir missing"
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             echo "Re-signing: $f"
