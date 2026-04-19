@@ -136,32 +136,33 @@ jobs:
 
       # tauri-action *deletes* the .sig files after its own latest.json
       # attempt fails (per-platform it only has one sig, so it skips).
-      # Re-sign the updater archives with the same private key so the .sig
-      # files exist again for the next upload step.
+      # Re-sign the updater archives so the .sig files exist again for
+      # the upload step.
+      #
+      # Key handling: `tauri signer sign -k <VAL>` takes the key VALUE
+      # directly, not a file path. We rely on TAURI_SIGNING_PRIVATE_KEY
+      # (same env var the internal tauri-action uses) and let the CLI
+      # read it implicitly.
       - name: Re-sign updater archives
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
-          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TARGET: ${{ matrix.target }}
         run: |
           set -eu
-          # Write the base64 key to a temp file. Tauri signer reads either a
-          # path or raw value — path is safer on Windows (avoids arg mangling).
-          printf '%s' "$SIGNING_KEY" > "$RUNNER_TEMP/tauri.key"
           BUNDLE="src-tauri/target/$TARGET/release/bundle"
-          # Use the tauri CLI we can pull on demand. This is the same key
-          # handling as tauri-action's internal call.
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             echo "Re-signing: $f"
-            npx -y @tauri-apps/cli@^2 signer sign -k "$RUNNER_TEMP/tauri.key" "$f" || {
+            # No -k flag — the CLI picks up TAURI_SIGNING_PRIVATE_KEY from env.
+            npx -y @tauri-apps/cli@^2 signer sign "$f" || {
               echo "::warning::Failed to sign $f"
             }
           done < <(find "$BUNDLE" -maxdepth 4 \
             \( -name '*.app.tar.gz' -o -name '*.nsis.zip' -o -name '*.AppImage.tar.gz' \) \
             -not -name '*.sig' -print)
-          rm -f "$RUNNER_TEMP/tauri.key"
 
       # Upload every updater archive + its .sig to the release. tauri-action
       # won't ship the sigs on its own (it wants to generate latest.json
