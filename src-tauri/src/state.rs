@@ -185,6 +185,11 @@ mod settings_tests {
         assert!((parsed.mouse_sensitivity - 1.0).abs() < 1e-9);
         assert!(parsed.hide_cursor_during_relay);
         assert!(parsed.auto_gaming_mode);
+        // v0.3.11 — developer_mode defaults to false for upgrading users.
+        // Critical for privacy: a pre-v0.3.11 config.json must NEVER deserialize
+        // into `developer_mode = true` on upgrade, because that would silently
+        // opt the user into cross-PC diagnostic data exchange without asking.
+        assert_eq!(parsed.developer_mode, false);
         // Non-new defaults still hold.
         assert_eq!(parsed.edge_dwell_ms, 150);
         assert!(parsed.auto_reconnect);

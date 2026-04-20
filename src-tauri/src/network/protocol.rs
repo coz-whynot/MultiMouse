@@ -331,4 +331,69 @@ mod tests {
     fn protocol_version_is_v6() {
         assert_eq!(PROTOCOL_VERSION, 6);
     }
+
+    /// v0.3.11 extended `PeerVersion` with an additive optional
+    /// `developer_mode: Option<bool>` (serde-default). A v0.3.10-or-earlier
+    /// peer ships JSON without that field; we MUST still deserialize it
+    /// cleanly and end up with `None`. If this test breaks, upgrading one
+    /// side to v0.3.11 without updating the peer will kill the session on
+    /// receipt of the older peer's PeerVersion.
+    #[test]
+    fn peer_version_backward_compatible_without_developer_mode_field() {
+        let legacy = r#"{"type":"PeerVersion","data":{"app_version":"0.3.10"}}"#;
+        let parsed: Message = serde_json::from_str(legacy).expect("legacy PeerVersion parse");
+        match parsed {
+            Message::PeerVersion { app_version, developer_mode } => {
+                assert_eq!(app_version, "0.3.10");
+                assert!(developer_mode.is_none(), "developer_mode must default to None");
+            }
+            _ => panic!("expected PeerVersion variant"),
+        }
+    }
+
+    /// Symmetric test — a v0.3.11 `PeerVersion` with `developer_mode: true`
+    /// round-trips through JSON, and the field survives. Together with the
+    /// legacy test above this guards both directions of the additive
+    /// extension.
+    #[test]
+    fn peer_version_round_trip_with_developer_mode() {
+        let v = Message::PeerVersion {
+            app_version: "0.3.11".into(),
+            developer_mode: Some(true),
+        };
+        let bytes = serde_json::to_vec(&v).expect("serialize");
+        let back: Message = serde_json::from_slice(&bytes).expect("deserialize");
+        match back {
+            Message::PeerVersion { app_version, developer_mode } => {
+                assert_eq!(app_version, "0.3.11");
+                assert_eq!(developer_mode, Some(true));
+            }
+            _ => panic!("expected PeerVersion variant"),
+        }
+    }
+
+    /// The new v0.3.11 variants `DevStateRequest` / `DevStateShare` must
+    /// round-trip cleanly. If either of these fails, cross-PC dev sync
+    /// breaks even between two v0.3.11 peers.
+    #[test]
+    fn dev_state_messages_round_trip() {
+        let req = Message::DevStateRequest;
+        let bytes = serde_json::to_vec(&req).expect("serialize request");
+        let back: Message = serde_json::from_slice(&bytes).expect("deserialize request");
+        assert!(matches!(back, Message::DevStateRequest));
+
+        let share = Message::DevStateShare {
+            state_json: r#"{"a":1}"#.into(),
+            events_json: "[]".into(),
+        };
+        let bytes = serde_json::to_vec(&share).expect("serialize share");
+        let back: Message = serde_json::from_slice(&bytes).expect("deserialize share");
+        match back {
+            Message::DevStateShare { state_json, events_json } => {
+                assert_eq!(state_json, r#"{"a":1}"#);
+                assert_eq!(events_json, "[]");
+            }
+            _ => panic!("expected DevStateShare"),
+        }
+    }
 }
