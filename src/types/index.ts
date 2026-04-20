@@ -38,6 +38,14 @@ export interface Settings {
   idle_lock_minutes: number;
   privacy_blur_on_relay: boolean;
   gaming_mode: boolean;
+  hide_cursor_during_relay: boolean;
+  auto_gaming_mode: boolean;
+  /** Swap-control hotkeys (rdev Debug-format key names, e.g. "F9"). Only
+   *  active while `gaming_mode` is true. Up to 9 entries supported. */
+  switch_hotkeys: string[];
+  /** Multiplier applied to sender-side mouse deltas. 1.0 = native feel.
+   *  Range [0.1, 5.0] — clamped on the Rust side. */
+  mouse_sensitivity: number;
 }
 
 export interface PairingRequest {

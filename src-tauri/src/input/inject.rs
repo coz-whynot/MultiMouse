@@ -316,28 +316,37 @@ fn inject(enigo: &mut Enigo, event: InputEvent, state: &AppState) {
         InputEvent::Key { key, pressed, unicode } => {
             let dir = if pressed { Direction::Press } else { Direction::Release };
             let mapped = rdev_key_to_enigo(&key);
-            tracing::debug!(
-                "[key] inject {} pressed={} mapped={} unicode={:?}",
-                key, pressed, mapped.is_some(), unicode
-            );
+            let has_mapping = mapped.is_some();
             // Primary path: keycode-based injection. Respects press/release
             // semantics (necessary for held-modifier scenarios like
             // Shift+letter, and for gaming keys like hold-W-to-walk).
-            if let Some(k) = mapped {
-                let _ = enigo.key(k, dir);
+            // enigo.key on macOS goes through TIS/UCKeyTranslate — on some
+            // layouts/keyboards (e.g. ProtoArc over BT with a non-US layout
+            // active on the receiver) the translation fails and returns
+            // Err. Fall through to the text path in that case, not just on
+            // a missing mapping.
+            let primary_ok = if let Some(k) = mapped {
+                enigo.key(k, dir).is_ok()
+            } else {
+                false
+            };
+            tracing::debug!(
+                "[key] inject {} pressed={} mapped={} primary_ok={} unicode={:?}",
+                key, pressed, has_mapping, primary_ok, unicode
+            );
+            if primary_ok {
                 return;
             }
-            // Fallback path: the sender's rdev Debug-format name wasn't
-            // in the local keycode table (rdev's Debug format is not
-            // stable across platforms — `KpReturn` collapses to `Return`
-            // on Windows, numpad names vary with NumLock state, etc.).
-            // If the sender also shipped a unicode-translated character
-            // via its local keyboard layout, type it as text. enigo.text
-            // respects any currently-held modifiers (Shift, etc.) via the
-            // CGEventSource's CombinedSessionState, so Shift+A still
-            // produces "A" on the receiver. We only invoke on press —
-            // enigo.text is press+release atomic internally, so mirroring
-            // on the Release would type the character twice.
+            // Fallback path: either the rdev Debug-format name wasn't in
+            // the local keycode table, or the keycode injection itself
+            // failed. If the sender shipped a unicode-translated character
+            // via its local keyboard layout (rdev's Event.name has any
+            // held-modifier state pre-applied — so "Shift+a" arrives as
+            // "A"), type it as text. enigo.text uses
+            // CGEventKeyboardSetUnicodeString on macOS, which bypasses
+            // TIS entirely — genuinely independent of the primary path.
+            // We only invoke on press: enigo.text is press+release atomic
+            // internally, so mirroring on Release would type twice.
             if pressed {
                 if let Some(txt) = unicode.filter(|s| !s.is_empty()) {
                     let _ = enigo.text(&txt);
@@ -471,4 +480,42 @@ fn rdev_key_to_enigo(key_str: &str) -> Option<Key> {
         "RightArrow" => Key::RightArrow,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Known rdev Debug-format names must map to the enigo primary-path. If
+    /// one of these starts returning None after an rdev/enigo upgrade, users
+    /// lose keycode-precise injection for that key (the text fallback can
+    /// still type a letter, but won't work for modifiers or F-keys). This
+    /// test is the canary.
+    #[test]
+    fn rdev_key_to_enigo_maps_common_keys() {
+        for name in [
+            "KeyA", "KeyZ", "Num0", "Num9", "Return", "Escape",
+            "BackSpace", "Tab", "Space", "ShiftLeft", "ShiftRight",
+            "ControlLeft", "ControlRight", "F1", "F12",
+            "UpArrow", "LeftArrow",
+        ] {
+            assert!(
+                rdev_key_to_enigo(name).is_some(),
+                "expected mapping for {} to exist",
+                name
+            );
+        }
+    }
+
+    /// Unknown names must return None — that's the signal the inject path
+    /// uses to trigger the unicode text fallback. If this silently started
+    /// returning Some(something-wrong), the primary path would spuriously
+    /// succeed and skip the fallback on real layout-mismatch cases.
+    #[test]
+    fn rdev_key_to_enigo_returns_none_for_unknown_names() {
+        assert!(rdev_key_to_enigo("").is_none());
+        assert!(rdev_key_to_enigo("UnknownKey").is_none());
+        // rdev's "Unknown(u32)" variant shows up as `Unknown(85)` via Debug.
+        assert!(rdev_key_to_enigo("Unknown(85)").is_none());
+    }
 }

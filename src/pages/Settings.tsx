@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
@@ -156,6 +156,346 @@ const Row = ({ children, noDivider }: { children: React.ReactNode; noDivider?: b
     {children}
   </div>
 );
+
+/* ── Hotkeys & Input section ──
+   Groups: mouse sensitivity, transition edge, release hotkey, two
+   input-behaviour toggles, and the gaming-mode switch-hotkey editor. All
+   controls write through the parent's `update()` helper so there's a single
+   settings-persistence path. */
+const MAX_SWITCH_HOTKEYS = 9;
+const SWITCH_HOTKEY_VALUES = [
+  'F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12',
+];
+const EDGE_VALUES: Array<Settings['transition_edge']> = ['left', 'right', 'top', 'bottom'];
+const RELEASE_HOTKEY_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'ctrl+ctrl',   label: 'Ctrl × 2' },
+  { value: 'shift+shift', label: 'Shift × 2' },
+  { value: 'alt+alt',     label: 'Alt × 2' },
+  { value: 'caps_lock',   label: 'Caps Lock' },
+];
+
+const HotkeysAndInputSection = ({
+  settings,
+  update,
+}: {
+  settings: Settings;
+  update: (patch: Partial<Settings>) => Promise<void>;
+}) => {
+  // F-key capture: clicking "Record" focuses a hidden input that swallows the
+  // next F1–F12 keydown. macOS users may have F-keys remapped to media
+  // controls by the OS (Fn-key row), so we also show a manual text input
+  // as a reliable fallback.
+  const [recording, setRecording] = useState(false);
+  const [manualInput, setManualInput] = useState('');
+  const recordRef = useRef<HTMLInputElement | null>(null);
+
+  const current = settings.switch_hotkeys ?? [];
+  const canAdd = current.length < MAX_SWITCH_HOTKEYS;
+
+  const addHotkey = (name: string) => {
+    const v = name.trim().toUpperCase();
+    if (!SWITCH_HOTKEY_VALUES.includes(v)) return;
+    if (current.includes(v)) return;
+    if (!canAdd) return;
+    update({ switch_hotkeys: [...current, v] });
+  };
+
+  const removeHotkey = (name: string) => {
+    update({ switch_hotkeys: current.filter((h) => h !== name) });
+  };
+
+  const onRecordKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Only F1–F12 are valid swap hotkeys server-side. Anything else is a
+    // no-op — user sees the button snap back to "Record" and can retry.
+    e.preventDefault();
+    const k = e.key;
+    if (/^F\d{1,2}$/.test(k) && SWITCH_HOTKEY_VALUES.includes(k)) {
+      addHotkey(k);
+    }
+    setRecording(false);
+  };
+
+  useEffect(() => {
+    if (recording) recordRef.current?.focus();
+  }, [recording]);
+
+  return (
+    <Section
+      title="Hotkeys & Input"
+      className="lg:col-span-2"
+      icon={
+        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
+        </svg>
+      }
+    >
+      {/* Mouse sensitivity */}
+      <Row>
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
+              Mouse sensitivity
+            </p>
+            <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
+              Multiplies movement before it's sent to the other machine. Raise it if your mouse feels slow on the remote side due to a DPI mismatch.
+            </p>
+          </div>
+          <span
+            className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg flex-shrink-0"
+            style={{
+              background: 'var(--accent-soft-bg)',
+              border: '1px solid var(--accent-soft-br)',
+              color: 'var(--accent-primary)',
+            }}
+          >
+            {(settings.mouse_sensitivity ?? 1.0).toFixed(1)}×
+          </span>
+        </div>
+        <input
+          type="range"
+          min={0.1}
+          max={5.0}
+          step={0.1}
+          value={settings.mouse_sensitivity ?? 1.0}
+          onChange={(e) => update({ mouse_sensitivity: Number(e.target.value) })}
+          className="w-full"
+          style={{ accentColor: 'var(--accent-primary)' }}
+        />
+        <div className="flex justify-between mt-1 text-[10px]" style={{ color: 'var(--text-faint)' }}>
+          <span>0.1×</span>
+          <span>1.0×</span>
+          <span>5.0×</span>
+        </div>
+      </Row>
+
+      {/* Transition edge */}
+      <Row>
+        <div className="flex items-start justify-between gap-4 mb-2">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
+              Transition edge
+            </p>
+            <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
+              Which screen edge sends the cursor to the other machine.
+            </p>
+          </div>
+        </div>
+        <div
+          className="flex items-center rounded-xl p-0.5 flex-wrap gap-0.5"
+          style={{
+            background: 'var(--bg-subtle)',
+            border: '1px solid var(--border-subtle)',
+          }}
+        >
+          {EDGE_VALUES.map((edge) => {
+            const active = settings.transition_edge === edge;
+            return (
+              <button
+                key={edge}
+                onClick={() => update({ transition_edge: edge })}
+                className="relative flex-1 px-2 py-1 text-[11px] font-semibold transition-colors capitalize"
+                style={{ color: active ? 'white' : 'var(--text-muted)', minWidth: 52 }}
+              >
+                {active && (
+                  <motion.div
+                    layoutId="edge-pill"
+                    className="absolute inset-0 rounded-lg"
+                    style={{
+                      background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                      boxShadow: '0 2px 8px rgba(99,102,241,0.35)',
+                    }}
+                    transition={{ type: 'spring', stiffness: 500, damping: 34 }}
+                  />
+                )}
+                <span className="relative z-10">{edge}</span>
+              </button>
+            );
+          })}
+        </div>
+      </Row>
+
+      {/* Release hotkey */}
+      <Row>
+        <div className="flex items-start justify-between gap-4 mb-2">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
+              Release hotkey
+            </p>
+            <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
+              Emergency way to yank control back to this machine. Esc also always works.
+            </p>
+          </div>
+        </div>
+        <div
+          className="flex items-center rounded-xl p-0.5 flex-wrap gap-0.5"
+          style={{
+            background: 'var(--bg-subtle)',
+            border: '1px solid var(--border-subtle)',
+          }}
+        >
+          {RELEASE_HOTKEY_OPTIONS.map((opt) => {
+            const active = settings.hotkey_release === opt.value;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => update({ hotkey_release: opt.value })}
+                className="relative flex-1 px-2 py-1 text-[11px] font-semibold transition-colors"
+                style={{ color: active ? 'white' : 'var(--text-muted)', minWidth: 80 }}
+              >
+                {active && (
+                  <motion.div
+                    layoutId="release-pill"
+                    className="absolute inset-0 rounded-lg"
+                    style={{
+                      background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                      boxShadow: '0 2px 8px rgba(99,102,241,0.35)',
+                    }}
+                    transition={{ type: 'spring', stiffness: 500, damping: 34 }}
+                  />
+                )}
+                <span className="relative z-10">{opt.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </Row>
+
+      {/* Behaviour toggles */}
+      <Row>
+        <Toggle
+          label="Hide cursor while controlling"
+          description="Make this machine's cursor invisible while you're driving the remote, so two cursors don't compete visually."
+          checked={settings.hide_cursor_during_relay ?? true}
+          onChange={(v) => update({ hide_cursor_during_relay: v })}
+        />
+      </Row>
+      <Row>
+        <Toggle
+          label="Auto gaming mode"
+          description="Turn gaming mode on automatically when a fullscreen app is in the foreground."
+          checked={settings.auto_gaming_mode ?? true}
+          onChange={(v) => update({ auto_gaming_mode: v })}
+        />
+      </Row>
+
+      {/* Switch hotkeys (gaming-mode only) */}
+      <Row noDivider>
+        <div className="flex items-start justify-between gap-4 mb-2">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
+              Swap-control hotkeys (gaming mode)
+            </p>
+            <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
+              While gaming mode is on, pressing any of these toggles which machine the mouse drives. F1–F12 only; up to {MAX_SWITCH_HOTKEYS}.
+            </p>
+          </div>
+          <span
+            className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg flex-shrink-0"
+            style={{
+              background: 'var(--accent-soft-bg)',
+              border: '1px solid var(--accent-soft-br)',
+              color: 'var(--accent-primary)',
+            }}
+          >
+            {current.length}/{MAX_SWITCH_HOTKEYS}
+          </span>
+        </div>
+
+        {current.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {current.map((h) => (
+              <span
+                key={h}
+                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-mono font-bold"
+                style={{
+                  background: 'var(--bg-subtle)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                {h}
+                <button
+                  onClick={() => removeHotkey(h)}
+                  className="ml-0.5 w-4 h-4 rounded-full flex items-center justify-center transition-colors"
+                  style={{ color: 'var(--text-ghost)' }}
+                  title={`Remove ${h}`}
+                  aria-label={`Remove ${h}`}
+                >
+                  <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => setRecording(true)}
+            disabled={!canAdd}
+            className="text-xs px-2.5 py-1.5 rounded-lg font-semibold transition-all disabled:opacity-40"
+            style={{
+              background: recording ? 'var(--accent-soft-bg)' : 'var(--bg-subtle)',
+              border: `1px solid ${recording ? 'var(--accent-soft-br)' : 'var(--border-subtle)'}`,
+              color: recording ? 'var(--accent-primary)' : 'var(--text-muted)',
+            }}
+          >
+            {recording ? 'Press F1–F12…' : 'Record'}
+          </button>
+          {/* Hidden input that captures the next keydown while recording. */}
+          <input
+            ref={recordRef}
+            type="text"
+            value=""
+            readOnly
+            onKeyDown={onRecordKeyDown}
+            onBlur={() => setRecording(false)}
+            tabIndex={-1}
+            aria-hidden={!recording}
+            className="sr-only"
+          />
+          <span className="text-[10px]" style={{ color: 'var(--text-faint)' }}>or</span>
+          <input
+            type="text"
+            value={manualInput}
+            onChange={(e) => setManualInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                addHotkey(manualInput);
+                setManualInput('');
+              }
+            }}
+            placeholder="type F9"
+            disabled={!canAdd}
+            className="rounded-lg px-2 py-1 text-xs font-mono focus:outline-none disabled:opacity-40"
+            style={{
+              background: 'var(--bg-input)',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-secondary)',
+              width: 88,
+            }}
+          />
+          <button
+            onClick={() => {
+              addHotkey(manualInput);
+              setManualInput('');
+            }}
+            disabled={!canAdd || !manualInput.trim()}
+            className="text-xs px-2.5 py-1.5 rounded-lg font-semibold transition-all disabled:opacity-40"
+            style={{
+              background: 'var(--bg-subtle)',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-muted)',
+            }}
+          >
+            Add
+          </button>
+        </div>
+      </Row>
+    </Section>
+  );
+};
 
 /* ── Known device row ── */
 const KnownDeviceRow = ({
@@ -576,39 +916,8 @@ export const SettingsPage = () => {
         </Row>
       </Section>
 
-      {/* ── Keyboard shortcut ── */}
-      <Section
-        title="Release Hotkey"
-        icon={
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
-          </svg>
-        }
-      >
-        <Row noDivider>
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
-                Return cursor to this machine
-              </p>
-              <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
-                Tap Ctrl twice quickly to release control
-              </p>
-            </div>
-            <kbd
-              className="px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex-shrink-0"
-              style={{
-                background: 'var(--accent-soft-bg)',
-                border: '1px solid var(--accent-soft-br)',
-                color: 'var(--accent-primary)',
-                boxShadow: '0 2px 6px rgba(99,102,241,0.15)',
-              }}
-            >
-              Ctrl × 2
-            </kbd>
-          </div>
-        </Row>
-      </Section>
+      {/* ── Hotkeys & Input ── */}
+      <HotkeysAndInputSection settings={settings} update={update} />
 
       {/* ── Internet relay ── */}
       <Section

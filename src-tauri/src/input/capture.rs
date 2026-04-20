@@ -629,9 +629,19 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
     }
 }
 
-/// Compute where the cursor should appear on the remote screen when crossing an edge.
-/// Uses proportional Y (or X) mapping for the perpendicular axis, and places
-/// the cursor just inside the opposite edge on the remote.
+/// Compute where the cursor should appear on the remote screen when crossing
+/// an edge. The perpendicular axis is normalised within the **source monitor**
+/// (the one the cursor is on), not the whole virtual desktop — the previous
+/// whole-desktop normalisation placed the remote cursor in the wrong row/
+/// column when the user crossed from a non-primary monitor whose height (or
+/// width) differed from the primary.
+///
+/// Delegates to `layout::entry_point_on_monitor` (pure, unit-tested in
+/// `screen::layout`) once we've resolved which monitor the cursor is on.
+/// Falls back to the whole-virtual-desktop bounds if we can't find a
+/// containing monitor (rare — can happen transiently during hotplug before
+/// `refresh_monitors` runs, or for a synthetic edge-cross coordinate from
+/// the switch-hotkey handler).
 fn compute_entry_point(x: f64, y: f64, edge: &str, monitors: &[crate::state::MonitorInfo], state: &AppState) -> (f64, f64) {
     let (min_x, min_y, max_x, max_y) = layout::virtual_bounds(monitors);
     let local_w = (max_x - min_x).max(1.0);
@@ -640,13 +650,11 @@ fn compute_entry_point(x: f64, y: f64, edge: &str, monitors: &[crate::state::Mon
     let remote = *state.remote_screen.lock();
     let (rw, rh) = remote.unwrap_or((local_w, local_h));
 
-    match edge {
-        "right"  => (1.0, ((y - min_y) / local_h * rh).clamp(0.0, rh - 1.0)),
-        "left"   => (rw - 2.0, ((y - min_y) / local_h * rh).clamp(0.0, rh - 1.0)),
-        "top"    => (((x - min_x) / local_w * rw).clamp(0.0, rw - 1.0), rh - 2.0),
-        "bottom" => (((x - min_x) / local_w * rw).clamp(0.0, rw - 1.0), 1.0),
-        _        => (1.0, ((y - min_y) / local_h * rh).clamp(0.0, rh - 1.0)),
-    }
+    let source_rect = layout::monitor_containing(x, y, monitors)
+        .map(|m| (m.x as f64, m.y as f64, m.width as f64, m.height as f64))
+        .unwrap_or((min_x, min_y, local_w, local_h));
+
+    layout::entry_point_on_monitor(x, y, source_rect, edge, (rw, rh))
 }
 
 /// Convert an rdev event to an InputEvent for the network, applying

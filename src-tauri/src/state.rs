@@ -130,6 +130,56 @@ impl Default for Settings {
     }
 }
 
+#[cfg(test)]
+mod settings_tests {
+    use super::Settings;
+
+    /// JSON round-trip must preserve every field — including the v0.3.7
+    /// additions. If this test breaks after a `Settings` edit, the on-disk
+    /// `config.json` format has shifted.
+    #[test]
+    fn settings_round_trip_preserves_all_fields() {
+        let original = Settings {
+            switch_hotkeys: vec!["F9".into(), "F10".into()],
+            mouse_sensitivity: 1.75,
+            hide_cursor_during_relay: false,
+            auto_gaming_mode: false,
+            gaming_mode: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let back: Settings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.switch_hotkeys, original.switch_hotkeys);
+        assert!((back.mouse_sensitivity - 1.75).abs() < 1e-9);
+        assert_eq!(back.hide_cursor_during_relay, false);
+        assert_eq!(back.auto_gaming_mode, false);
+        assert_eq!(back.gaming_mode, true);
+    }
+
+    /// Legacy config (pre-v0.3.7 — no mouse_sensitivity / switch_hotkeys /
+    /// hide_cursor_during_relay / auto_gaming_mode) must still deserialize
+    /// using the `#[serde(default = …)]` helpers. Regression guard: if this
+    /// breaks, users upgrading from v0.3.0–v0.3.6 will lose their config.
+    #[test]
+    fn legacy_settings_json_without_new_fields_deserializes_with_defaults() {
+        let legacy = r#"{
+            "transition_edge": "right",
+            "hotkey_release": "ctrl+ctrl",
+            "launch_on_startup": false,
+            "theme": "dark",
+            "relay_url": ""
+        }"#;
+        let parsed: Settings = serde_json::from_str(legacy).expect("legacy parse");
+        assert_eq!(parsed.switch_hotkeys, Vec::<String>::new());
+        assert!((parsed.mouse_sensitivity - 1.0).abs() < 1e-9);
+        assert!(parsed.hide_cursor_during_relay);
+        assert!(parsed.auto_gaming_mode);
+        // Non-new defaults still hold.
+        assert_eq!(parsed.edge_dwell_ms, 150);
+        assert!(parsed.auto_reconnect);
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransferInfo {
     pub id: String,

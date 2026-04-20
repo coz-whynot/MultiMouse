@@ -6,19 +6,105 @@ mod screen;
 mod state;
 mod storage;
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use once_cell::sync::OnceCell;
 use tauri::{
     menu::{Menu, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
 };
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use state::AppState;
+
+// Held for the lifetime of the process so the background log-writer thread
+// keeps running. Dropping this guard would flush and close the writer.
+static LOG_GUARD: OnceCell<WorkerGuard> = OnceCell::new();
+// Absolute path of the current run's log file, if file logging was set up
+// successfully. Read by the tray "Show Log File" menu item.
+static LOG_PATH: OnceCell<Option<PathBuf>> = OnceCell::new();
+
+fn log_dir() -> Option<PathBuf> {
+    let dir = dirs::data_local_dir()?.join("MultiMouse").join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Public path accessor used by the tray "Show Log File" menu item.
+pub fn log_file_path() -> Option<PathBuf> {
+    LOG_PATH.get().cloned().flatten()
+}
+
+/// Initialise tracing with two layers: stderr (for `cargo run` / dev) and a
+/// non-blocking file writer at `<AppData>/MultiMouse/logs/multimouse.log`.
+///
+/// Behaviour choices, and why:
+/// - **Rename-before-create**: on startup we rename the previous run's
+///   `multimouse.log` to `multimouse.log.prev`. Single file per run keeps
+///   "send me your log" unambiguous and bounds disk use (max 2 files).
+/// - **Non-blocking writer with `lossy = true`**: any tracing call from the
+///   hot rdev capture / inject threads must never block on disk. Under a
+///   tracing flood we drop events rather than stall input latency.
+/// - **Fallback**: if anything about the file path fails (denied disk,
+///   readonly volume), we silently fall back to stderr-only — the app still
+///   runs, the tray menu item just won't have a path to open.
+fn init_logging() {
+    let filter_str = std::env::var("RUST_LOG")
+        .unwrap_or_else(|_| "multimouse=debug,warn".to_string());
+    let env_filter = EnvFilter::try_new(&filter_str)
+        .unwrap_or_else(|_| EnvFilter::new("warn"));
+
+    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+
+    let file_path: Option<PathBuf> = log_dir().map(|dir| {
+        let current = dir.join("multimouse.log");
+        let prev = dir.join("multimouse.log.prev");
+        if current.exists() {
+            let _ = std::fs::rename(&current, &prev);
+        }
+        current
+    });
+
+    if let Some(path) = file_path {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let (nb, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+                .lossy(true)
+                .finish(file);
+            // Only publish the path after we've confirmed the file actually
+            // opened — the tray "Show Log File" handler reveals LOG_PATH in
+            // Finder/Explorer, and showing a ghost path is worse than
+            // showing nothing (the menu item logs "no log file set" and
+            // does nothing, which is a clearer signal that file logging
+            // is not available this run).
+            let _ = LOG_PATH.set(Some(path));
+            let _ = LOG_GUARD.set(guard);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_writer(nb)
+                .with_ansi(false);
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(stderr_layer)
+                .with(file_layer)
+                .init();
+            return;
+        }
+    }
+
+    let _ = LOG_PATH.set(None);
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .init();
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter("multimouse=debug,warn")
-        .init();
+    init_logging();
 
     // If the previous process crashed mid-session via SIGKILL / force-quit
     // (panic hook and Drop chains can't recover from those), the user's
@@ -78,9 +164,13 @@ pub fn run() {
             let release = MenuItemBuilder::with_id("release", "Release Control (⎋)").build(app)?;
             let disconnect = MenuItemBuilder::with_id("disconnect", "Disconnect").build(app)?;
             let gaming = MenuItemBuilder::with_id("gaming", "Toggle Gaming Mode (Pause)").build(app)?;
+            let logs = MenuItemBuilder::with_id("logs", "Show Log File").build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-            let menu = Menu::with_items(app, &[&show, &release, &disconnect, &gaming, &sep, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[&show, &release, &disconnect, &gaming, &logs, &sep, &quit],
+            )?;
 
             // `default_window_icon()` can return None on Linux AppImage where
             // the icon resource isn't always registered by tauri-build. Use the
@@ -101,6 +191,7 @@ pub fn run() {
                     "release" => emergency_release(app),
                     "disconnect" => emergency_disconnect(app),
                     "gaming" => toggle_gaming_mode(app),
+                    "logs" => reveal_log_file(),
                     "quit" => {
                         shutdown_services(app);
                         std::process::exit(0);
@@ -402,6 +493,22 @@ fn toggle_gaming_mode(app: &AppHandle) {
         std::thread::spawn(move || storage::save_settings(&snapshot));
         let _ = app.emit("gaming-mode-changed", enabled);
         tracing::info!("Gaming mode {} (tray)", if enabled { "ON" } else { "OFF" });
+    }
+}
+
+/// Tray-menu "Show Log File" — reveals the current run's log file in Finder /
+/// Explorer so the user can attach it to a GitHub issue without knowing the
+/// filesystem path. Uses `reveal_item_in_dir` instead of `open_path` so the
+/// user can also see `multimouse.log.prev` (the previous run's rotated log)
+/// sitting alongside the current one — the previous run is usually the one
+/// that reproduced the bug.
+fn reveal_log_file() {
+    let Some(path) = log_file_path() else {
+        tracing::warn!("Show Log File clicked but no log file path is set");
+        return;
+    };
+    if let Err(e) = tauri_plugin_opener::reveal_item_in_dir(&path) {
+        tracing::error!("reveal_item_in_dir({}) failed: {}", path.display(), e);
     }
 }
 
