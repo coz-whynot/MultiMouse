@@ -86,8 +86,16 @@ pub enum Message {
     /// app version (not protocol version). Receiver compares with its own
     /// version; if peer is newer, UI nudges the local user to update via
     /// the existing Tauri updater. No auto-install — just a banner.
+    ///
+    /// v0.3.11+ — also carries `developer_mode` so the UI on both sides
+    /// knows whether to enable cross-PC diagnostic sync. Additive field
+    /// with `#[serde(default)]` — an older peer without this field
+    /// deserializes with `developer_mode = None`, which the UI treats as
+    /// "off" (conservative default, never auto-leaks diagnostic data).
     PeerVersion {
         app_version: String,
+        #[serde(default)]
+        developer_mode: Option<bool>,
     },
     /// v0.3.8+ — "please send me your log file" request. Additive over v6
     /// wire protocol — BOTH peers must be on v0.3.8+ for this to work.
@@ -106,6 +114,21 @@ pub enum Message {
     /// hanging). Size-capped at `LOG_SHARE_MAX` — see that constant.
     LogShare {
         content: String,
+    },
+    /// v0.3.11+ — "please send me your current debug state snapshot".
+    /// Additive; older peers fail to deserialize and drop the session,
+    /// so senders MUST gate on peer's app_version + developer_mode from
+    /// PeerVersion before emitting. Unlike LogRequest this does NOT
+    /// prompt the user — the peer-side developer_mode flag is treated
+    /// as implicit consent (both sides opted in).
+    DevStateRequest,
+    /// v0.3.11+ — reply to `DevStateRequest`. Payload is an opaque JSON
+    /// blob (the same shape `get_debug_state` returns) plus a rolling
+    /// tail of the last few dev events. Serialised as a string so the
+    /// wire schema is stable even if `get_debug_state`'s fields evolve.
+    DevStateShare {
+        state_json: String,
+        events_json: String,
     },
     Bye,
 }
@@ -198,6 +221,10 @@ pub enum NetCommand {
     /// v0.3.8+ — reply to a peer's log request with our log tail (or
     /// empty for rejected). See `Message::LogShare`.
     LogShare { content: String },
+    /// v0.3.11+ — outgoing DevStateRequest to peer.
+    DevStateRequest,
+    /// v0.3.11+ — outgoing DevStateShare reply to peer.
+    DevStateShare { state_json: String, events_json: String },
 }
 
 pub async fn read_enc_message<R: AsyncRead + Unpin>(

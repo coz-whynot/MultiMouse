@@ -427,7 +427,17 @@ pub async fn handle_controller(
     // the app-version nudge only (same protocol, different app versions).
     send_enc_message(
         &mut stream,
-        &Message::PeerVersion { app_version: env!("CARGO_PKG_VERSION").into() },
+        {
+            // Avoid holding the parking_lot RwLockReadGuard across the
+            // subsequent .await — read into a scalar first. Binding the
+            // Message to a local, then referencing that, ensures the
+            // guard drops at statement end before the await point.
+            let dev_mode_for_peer = state.settings.read().developer_mode;
+            &Message::PeerVersion {
+                app_version: env!("CARGO_PKG_VERSION").into(),
+                developer_mode: Some(dev_mode_for_peer),
+            }
+        },
         &mut send_enc,
     ).await;
 
@@ -689,6 +699,10 @@ pub async fn handle_controller(
                                     state.set_controlled(false);
                                     let _ = app.emit("focus-released", ());
                                     tracing::info!("Cursor reached return edge {:?} — sent ReturnToSender", entry_edge);
+                                    crate::input::capture::dev_event(
+                                        &app, &state, "return_to_sender",
+                                        serde_json::json!({ "edge": entry_edge }),
+                                    );
                                     entry_edge = None;
                                     departed = false;
                                 }
@@ -740,9 +754,11 @@ pub async fn handle_controller(
                             break;
                         }
                     }
-                    Message::PeerVersion { app_version } => {
+                    Message::PeerVersion { app_version, developer_mode } => {
                         *state.peer_app_version.lock() = Some(app_version.clone());
-                        let _ = app.emit("peer-version", app_version);
+                        *state.peer_dev_mode.lock() = developer_mode;
+                        let _ = app.emit("peer-version", &app_version);
+                        let _ = app.emit("peer-dev-mode", developer_mode.unwrap_or(false));
                     }
                     Message::LogRequest { requester_name } => {
                         handle_log_request(&state, &app, &write_tx, requester_name).await;
@@ -753,6 +769,23 @@ pub async fn handle_controller(
                         if let Some(tx) = state.pending_log_pull.lock().take() {
                             let _ = tx.send(content);
                         }
+                    }
+                    Message::DevStateRequest => {
+                        // Only reply if BOTH sides are in developer_mode —
+                        // this is the consent gate for live dev-state
+                        // exchange. If we're not in dev mode, we reply
+                        // with empty blobs so the peer's UI unblocks
+                        // cleanly rather than timing out.
+                        let we_opted_in = state.settings.read().developer_mode;
+                        let (state_json, events_json) = if we_opted_in {
+                            crate::input::capture::snapshot_dev_state_and_events(&state)
+                        } else {
+                            (String::new(), String::new())
+                        };
+                        let _ = write_tx.send(Message::DevStateShare { state_json, events_json }).await;
+                    }
+                    Message::DevStateShare { state_json, events_json } => {
+                        *state.peer_dev_state.lock() = Some((state_json, events_json));
                     }
                     Message::Bye => {
                         tracing::info!(peer = %peer_addr, "server: received Bye from peer");
@@ -973,6 +1006,10 @@ async fn cleanup(
     *state.peer_app_version.lock() = None;
     *state.pending_log_pull.lock() = None;
     *state.pending_log_request.lock() = None;
+    // v0.3.11 Phase 6 scrub.
+    *state.peer_dev_mode.lock() = None;
+    *state.peer_dev_state.lock() = None;
+    state.dev_events.lock().clear();
     state.set_relaying(false);
     state.set_controlled(false);
     state.reset_bandwidth();

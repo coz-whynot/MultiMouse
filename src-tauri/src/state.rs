@@ -99,6 +99,16 @@ pub struct Settings {
     /// capture paths (HID tap, Raw Input, Linux absolute fallback).
     #[serde(default = "default_mouse_sensitivity")]
     pub mouse_sensitivity: f64,
+    /// v0.3.11+ — when true, the Settings → Developer section is visible
+    /// and its features (live log tail, event feed, cursor tracker,
+    /// diagnose button, cross-PC diagnostic sync) activate. When false
+    /// (default), all of that code stays passive — capture.rs doesn't
+    /// emit dev events, the UI section is hidden, and peer-sync auto-
+    /// pulls are suppressed. Off by default because some features emit
+    /// at high frequency (cursor tracker) and would waste CPU / network
+    /// for normal users.
+    #[serde(default)]
+    pub developer_mode: bool,
 }
 
 fn default_edge_dwell_ms() -> u32 { 150 }
@@ -126,6 +136,7 @@ impl Default for Settings {
             auto_gaming_mode: true,
             switch_hotkeys: Vec::new(),
             mouse_sensitivity: 1.0,
+            developer_mode: false,
         }
     }
 }
@@ -292,6 +303,21 @@ pub struct AppState {
     /// been received yet (either session not started, or peer is on a
     /// pre-0.2.9 build that never shipped PeerVersion).
     pub peer_app_version: Mutex<Option<String>>,
+    /// v0.3.11+ rolling in-memory ring of the last ~50 dev events
+    /// emitted via `input::capture::dev_event` — populated only when
+    /// `settings.developer_mode` is on. Read by the cross-PC
+    /// DevStateShare reply so the peer's Developer panel can see this
+    /// side's recent timeline.
+    pub dev_events: Mutex<std::collections::VecDeque<serde_json::Value>>,
+    /// v0.3.11+ peer's `developer_mode` flag from PeerVersion. None from
+    /// pre-v0.3.11 peers — UI treats None as "off" (conservative: never
+    /// auto-leak dev data to a peer that hasn't opted in).
+    pub peer_dev_mode: Mutex<Option<bool>>,
+    /// v0.3.11+ latest DevStateShare payload from peer. Polled by UI
+    /// while both sides have dev_mode on. Tuple of (state_json,
+    /// events_json) — both opaque strings produced by
+    /// `get_debug_state` + recent-events-ringbuffer on peer side.
+    pub peer_dev_state: Mutex<Option<(String, String)>>,
     /// Notify signal raised when the server should break out of its read loop
     /// immediately — used to let the receiver kick the controller out via Esc.
     pub server_disconnect: std::sync::Arc<tokio::sync::Notify>,
@@ -384,6 +410,9 @@ impl AppState {
             pending_log_request: Mutex::new(None),
             last_log_request: Mutex::new(None),
             peer_app_version: Mutex::new(None),
+            dev_events: Mutex::new(std::collections::VecDeque::with_capacity(64)),
+            peer_dev_mode: Mutex::new(None),
+            peer_dev_state: Mutex::new(None),
             server_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
             peer_cooldowns: Mutex::new(HashMap::new()),
             edge_first_touch: Mutex::new(None),

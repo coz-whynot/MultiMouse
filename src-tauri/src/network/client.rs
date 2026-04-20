@@ -249,9 +249,16 @@ pub async fn connect_stream(
     // Announce our app version so the peer can nudge us to update if we're
     // behind. (Protocol version is already enforced by the handshake; this
     // is purely an app-version courtesy for "same protocol, newer build".)
+    // dev_mode is read into a scalar BEFORE the await-emitting send call
+    // so the parking_lot RwLockReadGuard (!Send) isn't held across .await.
+    let dev_mode_for_peer = state.settings.read().developer_mode;
+    let peer_version_msg = Message::PeerVersion {
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        developer_mode: Some(dev_mode_for_peer),
+    };
     send_enc_message(
         &mut stream,
-        &Message::PeerVersion { app_version: env!("CARGO_PKG_VERSION").into() },
+        &peer_version_msg,
         &mut send_enc,
     )
     .await;
@@ -307,6 +314,9 @@ pub async fn connect_stream(
                 NetCommand::LogRequest { requester_name } =>
                     Message::LogRequest { requester_name },
                 NetCommand::LogShare { content } => Message::LogShare { content },
+                NetCommand::DevStateRequest => Message::DevStateRequest,
+                NetCommand::DevStateShare { state_json, events_json } =>
+                    Message::DevStateShare { state_json, events_json },
                 NetCommand::Disconnect => unreachable!(),
             };
             if let Ok(data) = serde_json::to_vec(&msg) {
@@ -391,9 +401,11 @@ pub async fn connect_stream(
             Message::ActiveWindow { app_name } => {
                 let _ = app.emit("remote-active-window", app_name);
             }
-            Message::PeerVersion { app_version } => {
+            Message::PeerVersion { app_version, developer_mode } => {
                 *state.peer_app_version.lock() = Some(app_version.clone());
-                let _ = app.emit("peer-version", app_version);
+                *state.peer_dev_mode.lock() = developer_mode;
+                let _ = app.emit("peer-version", &app_version);
+                let _ = app.emit("peer-dev-mode", developer_mode.unwrap_or(false));
             }
             Message::LogRequest { requester_name } => {
                 // Mirror of server.rs handler — shared user-modal flow via
@@ -413,6 +425,18 @@ pub async fn connect_stream(
                 if let Some(tx) = state.pending_log_pull.lock().take() {
                     let _ = tx.send(content);
                 }
+            }
+            Message::DevStateRequest => {
+                let we_opted_in = state.settings.read().developer_mode;
+                let (state_json, events_json) = if we_opted_in {
+                    crate::input::capture::snapshot_dev_state_and_events(&state)
+                } else {
+                    (String::new(), String::new())
+                };
+                state.send_net(NetCommand::DevStateShare { state_json, events_json });
+            }
+            Message::DevStateShare { state_json, events_json } => {
+                *state.peer_dev_state.lock() = Some((state_json, events_json));
             }
             Message::EndedByPeer => {
                 // The other side clicked End/Disconnect. Mark our own
@@ -492,6 +516,11 @@ pub async fn connect_stream(
     *state.peer_app_version.lock() = None;
     *state.pending_log_pull.lock() = None;
     *state.pending_log_request.lock() = None;
+    // v0.3.11 Phase 6: scrub peer dev-mode flag + stored dev-state so a
+    // new session doesn't inherit the prior peer's capability state.
+    *state.peer_dev_mode.lock() = None;
+    *state.peer_dev_state.lock() = None;
+    state.dev_events.lock().clear();
     state.set_relaying(false);
     state.reset_bandwidth();
     state.reset_edge_state();

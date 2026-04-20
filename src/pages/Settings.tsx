@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
 import { useStore } from '../store/useStore';
 import { Settings, KnownDevice, BandwidthStats, AuditEntry } from '../types';
@@ -397,7 +398,314 @@ const DeveloperSection = () => {
           )}
         </AnimatePresence>
       </Row>
+
+      <Row>
+        <DiagnoseButton />
+      </Row>
+      <Row>
+        <CursorTrackerPanel />
+      </Row>
+      <Row>
+        <EventFeedPanel />
+      </Row>
+      <Row>
+        <LogTailPanel />
+      </Row>
+      <Row noDivider>
+        <PeerDevStatePanel connectedPeer={connectedPeer} />
+      </Row>
     </Section>
+  );
+};
+
+/* Phase 5 — inline diagnostic checker button + result panel. Runs a
+   Rust-side scripted check that reports which flags are currently
+   blocking edge-cross, with a suggested fix per failing check. */
+const DiagnoseButton = () => {
+  type Check = { name: string; ok: boolean; detail: string; fix: string | null };
+  const [checks, setChecks] = useState<Check[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <div>
+          <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>Diagnose</p>
+          <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: 'var(--text-faint)' }}>
+            Runs local checks and tells you which flag is blocking edge-cross, plus the button to click to fix it.
+          </p>
+        </div>
+        <button
+          onClick={async () => {
+            setBusy(true);
+            try {
+              const r = await invoke<Check[]>('run_diagnostics');
+              setChecks(r);
+            } catch (e) {
+              setChecks([{ name: 'diagnostics failed', ok: false, detail: String(e), fix: null }]);
+            } finally { setBusy(false); }
+          }}
+          className="flex-shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95"
+          style={{
+            background: 'var(--accent-soft-bg)',
+            border: '1px solid var(--accent-soft-br)',
+            color: 'var(--accent-primary)',
+          }}
+        >
+          {busy ? 'Running…' : 'Run checks'}
+        </button>
+      </div>
+      {checks && (
+        <div
+          className="rounded-xl overflow-hidden text-[11px] p-2"
+          style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-subtle)' }}
+        >
+          {checks.map((c, i) => (
+            <div
+              key={i}
+              className="flex items-start gap-1.5 py-1"
+              style={{ borderTop: i === 0 ? 'none' : '1px solid var(--divider)' }}
+            >
+              <span
+                className="inline-block w-2 h-2 rounded-full mt-1 flex-shrink-0"
+                style={{ background: c.ok ? 'var(--success)' : 'var(--danger)' }}
+              />
+              <div className="flex-1 min-w-0">
+                <p style={{ color: 'var(--text-secondary)' }}>
+                  <span className="font-semibold">{c.name}</span>
+                  <span style={{ color: 'var(--text-faint)' }}> — {c.detail}</span>
+                </p>
+                {c.fix && !c.ok && (
+                  <p className="mt-0.5" style={{ color: 'var(--accent-primary)' }}>↳ {c.fix}</p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* Phase 4 — listens to `mm-dev-cursor` and displays last cursor
+   position. 10 Hz throttled on the Rust side so it doesn't flood. */
+const CursorTrackerPanel = () => {
+  const [cur, setCur] = useState<{ x: number; y: number; is_relaying: boolean; is_controlled: boolean } | null>(null);
+  useEffect(() => {
+    let un: UnlistenFn | null = null;
+    listen<{ x: number; y: number; is_relaying: boolean; is_controlled: boolean }>('mm-dev-cursor', (e) => {
+      setCur(e.payload);
+    }).then((fn) => { un = fn; });
+    return () => { if (un) un(); };
+  }, []);
+  return (
+    <div>
+      <p className="text-sm font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Cursor tracker</p>
+      <div
+        className="rounded-xl px-3 py-2 text-[11px] font-mono"
+        style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+      >
+        {cur ? (
+          <>
+            <span>x: {cur.x.toFixed(0)}, y: {cur.y.toFixed(0)}</span>
+            <span className="ml-3" style={{ color: cur.is_relaying ? 'var(--accent-primary)' : 'var(--text-faint)' }}>
+              relay {cur.is_relaying ? 'on' : 'off'}
+            </span>
+            <span className="ml-2" style={{ color: cur.is_controlled ? 'var(--accent-primary)' : 'var(--text-faint)' }}>
+              controlled {cur.is_controlled ? 'yes' : 'no'}
+            </span>
+          </>
+        ) : (
+          <span style={{ color: 'var(--text-faint)' }}>Move your mouse — tracker fires at 10 Hz</span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* Phase 3 — rolling 50-entry event feed. Subscribes to `mm-dev-event`. */
+type DevEvent = { ts: number; kind: string; detail: Record<string, unknown> };
+const EventFeedPanel = () => {
+  const [events, setEvents] = useState<DevEvent[]>([]);
+  useEffect(() => {
+    let un: UnlistenFn | null = null;
+    listen<DevEvent>('mm-dev-event', (e) => {
+      setEvents((prev) => {
+        const next = [...prev, e.payload];
+        return next.length > 50 ? next.slice(next.length - 50) : next;
+      });
+    }).then((fn) => { un = fn; });
+    return () => { if (un) un(); };
+  }, []);
+  const kindColor = (k: string) =>
+    k === 'relay_on' || k === 'edge_touch' ? 'var(--success)'
+    : k === 'kick' || k === 'relay_off' ? 'var(--danger)'
+    : k === 'return_to_sender' ? '#fbbf24'
+    : 'var(--text-muted)';
+  return (
+    <div>
+      <p className="text-sm font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Event feed</p>
+      <div
+        className="rounded-xl p-2 max-h-40 overflow-y-auto font-mono text-[10px] leading-snug"
+        style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-subtle)' }}
+      >
+        {events.length === 0 ? (
+          <span style={{ color: 'var(--text-faint)' }}>No events yet. Move cursor to edge / connect / kick to see activity.</span>
+        ) : (
+          events.slice().reverse().map((e, i) => {
+            const d = new Date(e.ts);
+            const t = `${d.toTimeString().slice(0, 8)}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+            return (
+              <div key={`${e.ts}-${i}`} className="flex gap-1.5">
+                <span style={{ color: 'var(--text-faint)' }}>{t}</span>
+                <span style={{ color: kindColor(e.kind), minWidth: 100, display: 'inline-block' }}>{e.kind}</span>
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {JSON.stringify(e.detail)}
+                </span>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* Phase 2 — live log tail. Polls get_log_tail(100) every 500 ms. */
+const LogTailPanel = () => {
+  const [tail, setTail] = useState<string>('');
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const t = await invoke<string>('get_log_tail', { lines: 100 });
+        if (!cancelled) setTail(t);
+      } catch { /* log not available; ignore */ }
+    };
+    poll();
+    const id = window.setInterval(poll, 500);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, []);
+  return (
+    <div>
+      <p className="text-sm font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Log tail (last 100 lines)</p>
+      <pre
+        className="rounded-xl p-2 max-h-60 overflow-auto font-mono text-[10px] leading-snug whitespace-pre"
+        style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}
+      >
+        {tail || 'No log available this run'}
+      </pre>
+    </div>
+  );
+};
+
+/* Phase 6 — when both sides have developer_mode on, the local UI
+   auto-pulls the peer's debug state + event ring every 2 s and shows
+   it here. Gated on `peer_dev_mode` being true — pre-v0.3.11 peers (or
+   peers with dev mode off) will not send DevStateShare, so this panel
+   just displays a "peer dev mode off" hint. */
+const PeerDevStatePanel = ({ connectedPeer }: { connectedPeer: string | null }) => {
+  const [peerState, setPeerState] = useState<any | null>(null);
+  const [peerEvents, setPeerEvents] = useState<DevEvent[]>([]);
+  const [peerDevMode, setPeerDevMode] = useState<boolean | null>(null);
+
+  // Track peer_dev_mode via the `peer-dev-mode` event emitted by the
+  // Rust side on PeerVersion receipt. Defaults to null (unknown).
+  useEffect(() => {
+    let un: UnlistenFn | null = null;
+    listen<boolean>('peer-dev-mode', (e) => setPeerDevMode(e.payload)).then((fn) => { un = fn; });
+    return () => { if (un) un(); };
+  }, []);
+  useEffect(() => {
+    // Reset when peer changes.
+    if (!connectedPeer) {
+      setPeerState(null); setPeerEvents([]); setPeerDevMode(null);
+    }
+  }, [connectedPeer]);
+
+  // Auto-pull peer state every 2s when both sides are dev_mode on.
+  useEffect(() => {
+    if (!connectedPeer || peerDevMode !== true) return;
+    let cancelled = false;
+    const tick = async () => {
+      try { await invoke('pull_peer_dev_state'); } catch { /* peer not ready */ }
+      try {
+        const got = await invoke<{ state_json: string; events_json: string } | null>('get_peer_dev_state');
+        if (cancelled) return;
+        if (got && got.state_json) {
+          try { setPeerState(JSON.parse(got.state_json)); } catch { /* parse err */ }
+        }
+        if (got && got.events_json) {
+          try { setPeerEvents(JSON.parse(got.events_json) as DevEvent[]); } catch { /* parse err */ }
+        }
+      } catch { /* nothing to render yet */ }
+    };
+    tick();
+    const id = window.setInterval(tick, 2000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [connectedPeer, peerDevMode]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-1">
+        <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>Peer developer state</p>
+        <span
+          className="text-[10px] px-1.5 py-0.5 rounded"
+          style={{
+            background: peerDevMode ? 'var(--accent-soft-bg)' : 'var(--bg-subtle)',
+            color: peerDevMode ? 'var(--accent-primary)' : 'var(--text-faint)',
+          }}
+        >
+          peer dev mode: {peerDevMode === null ? 'unknown' : peerDevMode ? 'on' : 'off'}
+        </span>
+      </div>
+      {!connectedPeer ? (
+        <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>Not connected to a peer.</p>
+      ) : peerDevMode !== true ? (
+        <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
+          Peer's developer mode is off (or peer is on a pre-v0.3.11 build). Ask them to enable it to sync diagnostics.
+        </p>
+      ) : (
+        <div
+          className="rounded-xl p-2 text-[11px]"
+          style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-subtle)' }}
+        >
+          {peerState ? (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono" style={{ color: 'var(--text-secondary)' }}>
+              <div>connected_peer: {String(peerState.connected_peer ?? 'none').slice(0, 10)}</div>
+              <div>has_net_tx: {String(peerState.has_net_tx)}</div>
+              <div>can_edge_cross: {String(peerState.can_edge_cross)}</div>
+              <div>is_relaying: {String(peerState.is_relaying)}</div>
+              <div>is_controlled: {String(peerState.is_controlled)}</div>
+              <div>uptime_s: {peerState.session_duration_s ?? '—'}</div>
+              <div>edge: {peerState.transition_edge}</div>
+              <div>dwell_ms: {peerState.edge_dwell_ms}</div>
+              <div>bytes_in: {peerState.bytes_in}</div>
+              <div>bytes_out: {peerState.bytes_out}</div>
+              {peerState.peer_cooldowns?.length > 0 && (
+                <div className="col-span-2" style={{ color: 'var(--danger)' }}>
+                  peer cooldowns: {peerState.peer_cooldowns.length}
+                </div>
+              )}
+            </div>
+          ) : (
+            <p style={{ color: 'var(--text-faint)' }}>Waiting for first peer snapshot…</p>
+          )}
+          {peerEvents.length > 0 && (
+            <div className="mt-2 max-h-32 overflow-y-auto font-mono text-[10px] leading-snug" style={{ color: 'var(--text-muted)' }}>
+              {peerEvents.slice().reverse().slice(0, 20).map((e, i) => (
+                <div key={`${e.ts}-${i}`}>
+                  <span style={{ color: 'var(--text-faint)' }}>
+                    {new Date(e.ts).toTimeString().slice(0, 8)}
+                  </span>{' '}
+                  <span style={{ color: 'var(--text-secondary)' }}>{e.kind}</span>{' '}
+                  <span>{JSON.stringify(e.detail)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -408,7 +716,13 @@ const DeveloperSection = () => {
    Rust-side commands that redact secrets. Uses a local transient status
    line instead of a toast system — the project doesn't have one and
    inventing one just for this section is out of scope. */
-const DiagnosticsSection = () => {
+const DiagnosticsSection = ({
+  developerMode,
+  onToggleDeveloperMode,
+}: {
+  developerMode: boolean;
+  onToggleDeveloperMode: (v: boolean) => void;
+}) => {
   const { status: appStatus } = useStore();
   const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [pullBusy, setPullBusy] = useState(false);
@@ -474,6 +788,14 @@ const DiagnosticsSection = () => {
         </svg>
       }
     >
+      <Row>
+        <Toggle
+          label="Developer mode"
+          description="Reveals the Developer panel: live session state, log tail, event feed, cursor tracker, diagnose button, and cross-PC diagnostic sync when both sides have this on."
+          checked={developerMode}
+          onChange={onToggleDeveloperMode}
+        />
+      </Row>
       <Row noDivider>
         <p className="text-[11px] mb-3 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
           When something goes wrong, these make it easy to share what happened without the terminal.
@@ -1598,10 +1920,13 @@ export const SettingsPage = () => {
       </Section>
 
       {/* ── Diagnostics (v0.3.8 Phase E) ── */}
-      <DiagnosticsSection />
+      <DiagnosticsSection
+        developerMode={settings.developer_mode ?? false}
+        onToggleDeveloperMode={(v) => update({ developer_mode: v })}
+      />
 
-      {/* ── Developer tools (v0.3.9) ── */}
-      <DeveloperSection />
+      {/* ── Developer tools (v0.3.9+) ── only when the toggle is on */}
+      {settings.developer_mode && <DeveloperSection />}
 
       {/* ── About ── */}
       <Section

@@ -46,6 +46,9 @@ export interface Settings {
   /** Multiplier applied to sender-side mouse deltas. 1.0 = native feel.
    *  Range [0.1, 5.0] — clamped on the Rust side. */
   mouse_sensitivity: number;
+  /** v0.3.11+ — reveals Settings → Developer and enables cross-PC diag
+   *  sync. Off by default. */
+  developer_mode: boolean;
 }
 
 export interface PairingRequest {

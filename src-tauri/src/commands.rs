@@ -924,6 +924,181 @@ pub async fn clear_all_cooldowns(
     Ok(count)
 }
 
+/// Ask the peer for its current debug-state snapshot + recent event
+/// ring. Only works when BOTH sides have `developer_mode` on — the
+/// peer's reply is suppressed (empty payload) if its own flag is off,
+/// matching the "both must opt in" consent model.
+///
+/// Unlike `request_peer_logs` this does NOT prompt the user on the
+/// peer side: dev_mode being on is itself the consent signal. Light
+/// enough to poll at 1 Hz from the UI.
+#[tauri::command]
+pub async fn pull_peer_dev_state(
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if !state.settings.read().developer_mode {
+        return Err("Local developer_mode is off".into());
+    }
+    match state.peer_dev_mode.lock().clone() {
+        Some(true) => {}
+        Some(false) => return Err("Peer's developer_mode is off".into()),
+        None => return Err("Peer version / dev-mode not learnt yet".into()),
+    }
+    if state.net_tx.lock().is_none() {
+        return Err("No outbound session (only inbound). Click \u{201C}Open outbound session\u{201D} first.".into());
+    }
+    state.send_net(NetCommand::DevStateRequest);
+    Ok(())
+}
+
+/// Return the most recently received peer dev-state payload (set by the
+/// DevStateShare handler). The UI polls this alongside `pull_peer_dev_state`
+/// to stream peer state without awaiting each round-trip explicitly.
+#[tauri::command]
+pub async fn get_peer_dev_state(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<serde_json::Value>, String> {
+    let guard = state.peer_dev_state.lock().clone();
+    Ok(guard.map(|(sj, ej)| {
+        serde_json::json!({
+            "state_json": sj,
+            "events_json": ej,
+        })
+    }))
+}
+
+/// Run a scripted set of local checks to identify why edge-cross might
+/// not be working and return a structured report. The UI renders this as
+/// a pass/fail list — users can see at a glance which specific gate is
+/// blocking them (no peer connected, no outbound channel, cooldown
+/// active, etc.) and which button to click to fix it.
+///
+/// Read-only; does not modify any state. Safe to run repeatedly.
+#[tauri::command]
+pub async fn run_diagnostics(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let now = std::time::Instant::now();
+
+    let connected_peer = state.connected_peer.lock().clone();
+    let has_net_tx = state.net_tx.lock().is_some();
+    let is_controlled = state.is_controlled();
+    let monitors = state.monitors.read().clone();
+    let (edge, dwell_ms, gaming_mode, sensitivity) = {
+        let s = state.settings.read();
+        (s.transition_edge.clone(), s.edge_dwell_ms, s.gaming_mode, s.mouse_sensitivity)
+    };
+    let active_cooldowns: Vec<(String, u64)> = state
+        .peer_cooldowns
+        .lock()
+        .iter()
+        .filter_map(|(pid, until)| {
+            let r = until.saturating_duration_since(now).as_secs();
+            if r == 0 { None } else { Some((pid.clone(), r)) }
+        })
+        .collect();
+
+    // Helper to push a check.
+    let mut push = |name: &str, ok: bool, detail: &str, fix: Option<&str>| {
+        out.push(serde_json::json!({
+            "name": name,
+            "ok": ok,
+            "detail": detail,
+            "fix": fix,
+        }));
+    };
+
+    push(
+        "Peer connected",
+        connected_peer.is_some(),
+        &connected_peer.as_deref().unwrap_or("no active peer"),
+        if connected_peer.is_none() { Some("Go to Home, pick a peer, click Connect") } else { None },
+    );
+
+    push(
+        "Outbound session open (net_tx)",
+        has_net_tx,
+        if has_net_tx { "open — this machine can send input events" }
+        else { "absent — this machine can only receive input from the peer" },
+        if !has_net_tx && connected_peer.is_some() {
+            Some("Click \u{201C}Open outbound session\u{201D} in the Developer panel so this side can edge-cross too")
+        } else { None },
+    );
+
+    push(
+        "Not being controlled",
+        !is_controlled,
+        if is_controlled { "remote peer is currently driving this machine — local edge-cross is suspended" }
+        else { "free to initiate edge-cross" },
+        None,
+    );
+
+    push(
+        "No active cooldowns",
+        active_cooldowns.is_empty(),
+        &if active_cooldowns.is_empty() { "none".to_string() }
+         else { format!("{} entries: {}", active_cooldowns.len(), active_cooldowns.iter().map(|(p, r)| format!("{}… ({}s)", &p[..p.len().min(8)], r)).collect::<Vec<_>>().join(", ")) },
+        if !active_cooldowns.is_empty() {
+            Some("Click \u{201C}Clear cooldowns\u{201D} in the Developer panel")
+        } else { None },
+    );
+
+    push(
+        "Gaming mode off",
+        !gaming_mode,
+        if gaming_mode { "gaming mode is ON — edge-cross is disabled (only swap-hotkeys work)" }
+        else { "gaming mode is off, normal edge-cross is active" },
+        if gaming_mode { Some("Tray → Toggle Gaming Mode, or press Pause/Break") } else { None },
+    );
+
+    let monitor_count = monitors.len();
+    push(
+        "Monitor geometry known",
+        monitor_count > 0,
+        &format!("{} monitor(s) detected", monitor_count),
+        if monitor_count == 0 { Some("Close and reopen the app window; monitor enumeration runs on window show") } else { None },
+    );
+
+    let edge_ok = matches!(edge.as_str(), "left" | "right" | "top" | "bottom");
+    push(
+        "Transition edge is valid",
+        edge_ok,
+        &format!("configured edge: {}, dwell: {} ms", edge, dwell_ms),
+        if !edge_ok { Some("Open Settings → Hotkeys & Input and pick a transition edge") } else { None },
+    );
+
+    let sensitivity_ok = (0.1..=5.0).contains(&sensitivity);
+    push(
+        "Mouse sensitivity in range",
+        sensitivity_ok,
+        &format!("mouse_sensitivity = {:.2}", sensitivity),
+        if !sensitivity_ok { Some("Open Settings → Hotkeys & Input and set sensitivity between 0.1\u{00D7} and 5\u{00D7}") } else { None },
+    );
+
+    Ok(out)
+}
+
+/// Return the last N lines of the current run's log. Used by the
+/// Developer panel's live log tail which polls ~every 500ms while open.
+/// Caps `lines` at 500 so an over-large request doesn't stall the
+/// frontend with a multi-MB string.
+#[tauri::command]
+pub async fn get_log_tail(lines: usize) -> Result<String, String> {
+    let n = lines.clamp(1, 500);
+    let path = crate::log_file_path()
+        .ok_or_else(|| "Log file not available this run".to_string())?;
+    let tail = tokio::task::spawn_blocking(move || {
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        let ls: Vec<&str> = raw.lines().collect();
+        let start = ls.len().saturating_sub(n);
+        ls[start..].join("\n")
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(tail)
+}
+
 /// Force an outbound client session to a peer, even if that peer is
 /// already the active "server" for us. This is the v0.3.9 workaround for
 /// the "Mac is only passive-server, can't edge-cross out" case: by dialing

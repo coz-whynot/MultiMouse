@@ -16,6 +16,118 @@ const MOUSE_MOVE_INTERVAL_MS: u128 = 2;
 /// After a release, block edge activation for this long so the cursor has time
 /// to pull away from the edge without immediately re-triggering relay.
 const RELEASE_DEBOUNCE_MS: u128 = 800;
+/// Cursor-tracker emit throttle for the Developer panel. Real mouse motion
+/// fires at up to 1 kHz; shipping each event to the webview is wasteful. 10
+/// Hz is visible and cheap.
+const DEV_CURSOR_INTERVAL_MS: u128 = 100;
+
+/// Emit a timestamped diagnostic event to the Developer panel — but ONLY
+/// when `settings.developer_mode` is true. When off, this is a single
+/// read-lock check and an early return, so instrumenting hot paths with
+/// it is safe.
+///
+/// Event shape: `{ "ts": <unix_ms>, "kind": <str>, "detail": <any> }`.
+/// The UI listens for `"mm-dev-event"` and maintains a rolling list.
+pub(crate) fn dev_event(
+    app: &AppHandle,
+    state: &AppState,
+    kind: &'static str,
+    detail: serde_json::Value,
+) {
+    if !state.settings.read().developer_mode { return; }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let ev = serde_json::json!({
+        "ts": ts,
+        "kind": kind,
+        "detail": detail,
+    });
+    // Keep a bounded ring so the cross-PC DevStateShare reply can
+    // include the recent timeline. 50 entries is roughly a minute of
+    // interesting activity without blowing the 2 MiB frame cap.
+    {
+        let mut ring = state.dev_events.lock();
+        if ring.len() >= 50 { ring.pop_front(); }
+        ring.push_back(ev.clone());
+    }
+    let _ = app.emit("mm-dev-event", ev);
+}
+
+/// Build the JSON payload used by `Message::DevStateShare` — a
+/// best-effort snapshot of live debug flags plus the recent event ring.
+/// Returns `(state_json, events_json)` as strings so the wire format
+/// stays stable even if the internal shape of debug state evolves.
+pub(crate) fn snapshot_dev_state_and_events(state: &AppState) -> (String, String) {
+    use std::sync::atomic::Ordering;
+    let now = std::time::Instant::now();
+    let connected_peer = state.connected_peer.lock().clone();
+    let has_net_tx = state.net_tx.lock().is_some();
+    let is_relaying = state.is_relaying();
+    let is_controlled = state.is_controlled();
+    let last_activity_s_ago = state.last_activity.lock().elapsed().as_secs();
+    let session_duration_s = state.session_start.lock().map(|t| t.elapsed().as_secs());
+    let peer_app_version = state.peer_app_version.lock().clone();
+    let cooldowns: Vec<serde_json::Value> = state
+        .peer_cooldowns
+        .lock()
+        .iter()
+        .filter_map(|(pid, until)| {
+            let r = until.saturating_duration_since(now).as_secs();
+            if r == 0 { None } else { Some(serde_json::json!({ "peer_id": pid, "remaining_s": r })) }
+        })
+        .collect();
+    let (edge, dwell, gaming) = {
+        let s = state.settings.read();
+        (s.transition_edge.clone(), s.edge_dwell_ms, s.gaming_mode)
+    };
+    let state_value = serde_json::json!({
+        "connected_peer": connected_peer,
+        "has_net_tx": has_net_tx,
+        "can_edge_cross": has_net_tx && !is_controlled,
+        "is_relaying": is_relaying,
+        "is_controlled": is_controlled,
+        "last_activity_s_ago": last_activity_s_ago,
+        "session_duration_s": session_duration_s,
+        "peer_app_version": peer_app_version,
+        "peer_cooldowns": cooldowns,
+        "transition_edge": edge,
+        "edge_dwell_ms": dwell,
+        "gaming_mode": gaming,
+        "bytes_in": state.bytes_received.load(Ordering::Relaxed),
+        "bytes_out": state.bytes_sent.load(Ordering::Relaxed),
+    });
+    let events_vec: Vec<serde_json::Value> = state.dev_events.lock().iter().cloned().collect();
+    (
+        serde_json::to_string(&state_value).unwrap_or_default(),
+        serde_json::to_string(&events_vec).unwrap_or_default(),
+    )
+}
+
+/// 10 Hz cursor-position tracker for the Developer panel. Only fires when
+/// `settings.developer_mode` is on — the hot-path cost when off is a
+/// single RwLock read plus an Instant compare. Uses a thread_local Cell
+/// so the 100 ms throttle doesn't need a mutex.
+pub(crate) fn dev_cursor_track(app: &AppHandle, state: &AppState, x: f64, y: f64) {
+    if !state.settings.read().developer_mode { return; }
+    thread_local! {
+        static LAST_EMIT: Cell<Option<Instant>> = Cell::new(None);
+    }
+    let now = Instant::now();
+    let should_emit = LAST_EMIT.with(|cell| {
+        let ok = cell.get().map_or(true, |t| now.duration_since(t).as_millis() >= DEV_CURSOR_INTERVAL_MS);
+        if ok { cell.set(Some(now)); }
+        ok
+    });
+    if !should_emit { return; }
+    let _ = app.emit("mm-dev-cursor", serde_json::json!({
+        "x": x,
+        "y": y,
+        "is_relaying": state.is_relaying(),
+        "is_controlled": state.is_controlled(),
+    }));
+}
 
 /// Convert rdev's raw mouse coords into our canonical wire unit: **physical
 /// virtual-desktop pixels of the sender** (v5).
@@ -141,6 +253,7 @@ fn try_handle_switch_hotkey(event: &Event, state: &Arc<AppState>, app: &AppHandl
         *state.last_release.lock() = Some(Instant::now());
         let _ = app.emit("focus-released", ());
         tracing::info!("Relay released via switch hotkey ({:?})", pressed);
+        dev_event(app, state, "relay_off", serde_json::json!({ "via": "switch_hotkey" }));
     } else {
         if state.net_tx.lock().is_none() || state.connected_peer.lock().is_none() {
             // No peer to switch to — ignore rather than surprising the user.
@@ -173,6 +286,7 @@ fn try_handle_switch_hotkey(event: &Event, state: &Arc<AppState>, app: &AppHandl
         sync_clipboard_async(state);
         let _ = app.emit("focus-acquired", ());
         tracing::info!("Relay activated via switch hotkey ({:?})", pressed);
+        dev_event(app, state, "relay_on", serde_json::json!({ "via": "switch_hotkey" }));
     }
     true
 }
@@ -296,6 +410,7 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
             *state.last_release.lock() = Some(Instant::now());
             let _ = app.emit("focus-released", ());
             tracing::info!("Relay released via Escape");
+            dev_event(app, state, "relay_off", serde_json::json!({ "via": "escape" }));
             return None;
         }
         if let EventType::KeyPress(key) = &event.event_type {
@@ -310,6 +425,7 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
                     sync_clipboard_async(state);
                     let _ = app.emit("focus-released", ());
                     tracing::info!("Relay released via hotkey ({})", hotkey);
+                    dev_event(app, state, "relay_off", serde_json::json!({ "via": "release_hotkey", "hotkey": &hotkey }));
                     return None;
                 }
                 // Double-press logic
@@ -328,6 +444,7 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
                     sync_clipboard_async(state);
                     let _ = app.emit("focus-released", ());
                     tracing::info!("Relay released via hotkey ({})", hotkey);
+                    dev_event(app, state, "relay_off", serde_json::json!({ "via": "release_hotkey", "hotkey": &hotkey }));
                     return None;
                 }
             }
@@ -426,12 +543,19 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
                 if let Some(pid) = state.connected_peer.lock().clone() {
                     state.mark_peer_kicked(&pid);
                 }
+                dev_event(app, state, "kick", serde_json::json!({
+                    "event": format!("{:?}", event.event_type),
+                }));
                 state.signal_disconnect();
                 return None;
             }
         }
 
         if let EventType::MouseMove { x, y } = event.event_type {
+            // Developer cursor-tracker feed. Runs BEFORE the gaming-mode
+            // short-circuit so the Developer panel can still observe cursor
+            // motion while edge-cross is disabled.
+            dev_cursor_track(app, state, x, y);
             let (edge, dwell_ms, gaming) = {
                 let s = state.settings.read();
                 (s.transition_edge.clone(), s.edge_dwell_ms as u128, s.gaming_mode)
@@ -473,7 +597,13 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
                 let should_activate = {
                     let mut guard = state.edge_first_touch.lock();
                     match *guard {
-                        None => { *guard = Some(now); false }
+                        None => {
+                            *guard = Some(now);
+                            dev_event(app, state, "edge_touch", serde_json::json!({
+                                "edge": edge, "x": px, "y": py, "dwell_ms": dwell_ms,
+                            }));
+                            false
+                        }
                         Some(first) => now.duration_since(first).as_millis() >= dwell_ms,
                     }
                 };
@@ -520,8 +650,18 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
                     sync_clipboard_async(state);
                     let _ = app.emit("focus-acquired", ());
                     tracing::debug!("Relay ON — {} edge, entry=({entry_x:.0}, {entry_y:.0})", edge);
+                    dev_event(app, state, "relay_on", serde_json::json!({
+                        "edge": edge,
+                        "entry_x": entry_x, "entry_y": entry_y,
+                        "via": "edge_dwell",
+                    }));
                 }
             } else {
+                // Cursor left the edge before dwell completed — clear the timer.
+                // Emit a dev event only if a timer was actually armed.
+                if state.edge_first_touch.lock().is_some() {
+                    dev_event(app, state, "edge_leave", serde_json::json!({ "edge": edge }));
+                }
                 *state.edge_first_touch.lock() = None;
             }
         }
@@ -548,6 +688,7 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                     state.send_net(NetCommand::FocusReleased);
                     sync_clipboard_async(state);
                     tracing::info!("Relay released via hotkey ({})", hotkey);
+                    dev_event(app, state, "relay_off", serde_json::json!({ "via": "release_hotkey", "hotkey": &hotkey }));
                     return;
                 }
                 let now = Instant::now();
@@ -564,6 +705,7 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                     state.send_net(NetCommand::FocusReleased);
                     sync_clipboard_async(state);
                     tracing::info!("Relay released via hotkey ({})", hotkey);
+                    dev_event(app, state, "relay_off", serde_json::json!({ "via": "release_hotkey", "hotkey": &hotkey }));
                     return;
                 }
             }
@@ -582,6 +724,7 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
         }
 
         if let EventType::MouseMove { x, y } = event.event_type {
+            dev_cursor_track(app, state, x, y);
             let (edge, dwell_ms, gaming) = {
                 let s = state.settings.read();
                 (s.transition_edge.clone(), s.edge_dwell_ms as u128, s.gaming_mode)
@@ -601,7 +744,13 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                 let should_activate = {
                     let mut guard = state.edge_first_touch.lock();
                     match *guard {
-                        None => { *guard = Some(now); false }
+                        None => {
+                            *guard = Some(now);
+                            dev_event(app, state, "edge_touch", serde_json::json!({
+                                "edge": edge, "x": px, "y": py, "dwell_ms": dwell_ms,
+                            }));
+                            false
+                        }
                         Some(first) => now.duration_since(first).as_millis() >= dwell_ms,
                     }
                 };
@@ -621,8 +770,16 @@ fn handle_listen(event: &Event, state: &AppState, app: &AppHandle) {
                     state.send_net(NetCommand::Input(InputEvent::MouseMove { x: entry_x, y: entry_y }));
                     state.send_net(NetCommand::FocusAcquired);
                     sync_clipboard_async(state);
+                    dev_event(app, state, "relay_on", serde_json::json!({
+                        "edge": edge,
+                        "entry_x": entry_x, "entry_y": entry_y,
+                        "via": "edge_dwell_listen",
+                    }));
                 }
             } else {
+                if state.edge_first_touch.lock().is_some() {
+                    dev_event(app, state, "edge_leave", serde_json::json!({ "edge": edge }));
+                }
                 *state.edge_first_touch.lock() = None;
             }
         }

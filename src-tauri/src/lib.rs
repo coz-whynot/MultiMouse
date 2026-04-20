@@ -338,6 +338,10 @@ pub fn run() {
             commands::get_debug_state,
             commands::clear_all_cooldowns,
             commands::force_dial_peer,
+            commands::get_log_tail,
+            commands::run_diagnostics,
+            commands::pull_peer_dev_state,
+            commands::get_peer_dev_state,
             hide_window,
         ])
         .on_window_event(|window, event| {
