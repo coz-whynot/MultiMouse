@@ -849,7 +849,6 @@ pub async fn get_debug_state(
     let has_net_tx = state.net_tx.lock().is_some();
     let is_relaying = state.is_relaying();
     let is_controlled = state.is_controlled();
-    let last_pong_s_ago = state.last_pong.lock().elapsed().as_secs();
     let last_activity_s_ago = state.last_activity.lock().elapsed().as_secs();
     let session_duration_s = state
         .session_start
@@ -897,7 +896,6 @@ pub async fn get_debug_state(
         "can_edge_cross": has_net_tx && !is_controlled,
         "is_relaying": is_relaying,
         "is_controlled": is_controlled,
-        "last_pong_s_ago": last_pong_s_ago,
         "last_activity_s_ago": last_activity_s_ago,
         "session_duration_s": session_duration_s,
         "peer_app_version": peer_app_version,

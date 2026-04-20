@@ -48,10 +48,6 @@ pub async fn start_server(app: AppHandle, state: Arc<AppState>) {
                 if let Err(e) = stream.set_nodelay(true) {
                     tracing::warn!("set_nodelay failed on accept from {}: {}", peer_addr, e);
                 }
-                // Enable TCP keepalive so a silently-dead peer is detected
-                // in ~45s (30s idle + 3x5s probes) rather than the kernel
-                // default of ~2h. See crate::network::tune_session_socket.
-                crate::network::tune_session_socket(&stream);
                 tracing::info!("Connection from {}", peer_addr);
                 let app = app.clone();
                 let state = state.clone();

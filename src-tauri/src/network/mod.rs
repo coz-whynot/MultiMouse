@@ -7,7 +7,6 @@ pub mod trackpad;
 pub mod transfer;
 
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::AppHandle;
 use crate::state::AppState;
 
@@ -19,38 +18,14 @@ pub async fn start_all_services(app: AppHandle, state: Arc<AppState>) {
     );
 }
 
-/// Enable TCP keepalive on a session socket. Called from BOTH server-side
-/// (right after `listener.accept`) and client-side (right after the
-/// `TcpStream::connect` succeeds), before `into_split()` since the split
-/// halves don't expose the file descriptor.
-///
-/// Timing: 30s idle → first probe, 5s between probes, 3 probes → ~45s to
-/// detect a dead peer. That's the direct fix for the "silent half-open
-/// socket" incident in v0.3.7 — before this, the kernel defaults (~2h)
-/// governed detection.
-///
-/// Cross-platform notes:
-/// - macOS: `TCP_KEEPALIVE` (the "idle" timer) is always supported.
-///   `TCP_KEEPINTVL` and `TCP_KEEPCNT` were added in 10.15; on older mac
-///   OSes `socket2` silently no-ops them and keepalive remains functional
-///   at a coarser cadence.
-/// - Linux: all three options supported; behaves as specified.
-/// - Windows: backed by `WSAIoctl(SIO_KEEPALIVE_VALS)` which doesn't
-///   expose a retry count; `with_retries` becomes a no-op. Idle + interval
-///   still apply.
-///
-/// Failures (returning Err) are logged and then ignored — an undetected
-/// half-open socket is still a worse outcome than a harder-to-debug
-/// socket-config error, but a session missing keepalive just falls back
-/// to the pre-v0.3.8 behaviour.
 /// Read the local log file, keep only the last 500 lines, then cap the
 /// result at `protocol::LOG_SHARE_MAX` bytes (dropping leading lines —
 /// the diagnostic signal is at the END of a log, not the start). Returns
 /// an empty string if file logging wasn't set up this run.
 ///
-/// Used by both sides of the Phase F cross-device log-pull flow — either
-/// side can be the one answering a LogRequest, so this helper lives at
-/// network/mod level rather than duplicated in server/client.
+/// Used by both sides of the cross-device log-pull flow — either side can
+/// be the one answering a LogRequest, so this helper lives at network/mod
+/// level rather than duplicated in server/client.
 pub(crate) async fn read_log_tail_capped() -> String {
     let Some(path) = crate::log_file_path() else { return String::new() };
     let raw = tokio::task::spawn_blocking(move || {
@@ -70,23 +45,5 @@ pub(crate) async fn read_log_tail_capped() -> String {
         tail[safe..].to_string()
     } else {
         tail
-    }
-}
-
-pub(crate) fn tune_session_socket(stream: &tokio::net::TcpStream) {
-    // `with_retries` (TCP_KEEPCNT) is only exposed on Unix targets by
-    // socket2 — on Windows the WSAIoctl(SIO_KEEPALIVE_VALS) API takes
-    // only idle + interval, so socket2 omits the method entirely and
-    // calling it fails to compile. Gate it with cfg so Windows gets a
-    // valid keepalive config (just idle + interval, which is what the
-    // OS accepts) while Unix gets the full triple.
-    let keepalive = socket2::TcpKeepalive::new()
-        .with_time(Duration::from_secs(30))
-        .with_interval(Duration::from_secs(5));
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let keepalive = keepalive.with_retries(3);
-    let sock_ref = socket2::SockRef::from(stream);
-    if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
-        tracing::warn!(err = ?e, "tune_session_socket: set_tcp_keepalive failed; session continues without keepalive");
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "multimouse"
-version = "0.3.9"
+version = "0.3.10"
 description = "Share mouse and keyboard across devices"
 authors = ["MultiMouse Contributors"]
 license = "MIT"
@@ -49,12 +49,6 @@ sha2 = "0.10"
 sha1 = "0.10"
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
-# Direct dep (already transitively in the tree via tokio/mio) so we can call
-# `SockRef::set_tcp_keepalive` on the session TCP stream. Without OS-level
-# keepalive, a peer's silent disconnect leaves the socket half-open for the
-# kernel default (~2h on macOS/Linux) before either side notices. 30s idle
-# + 5s interval + 3 probes detects dead sockets in ~45s.
-socket2 = "0.5"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 subtle = "2"
 

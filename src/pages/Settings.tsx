@@ -168,7 +168,6 @@ type DebugState = {
   can_edge_cross: boolean;
   is_relaying: boolean;
   is_controlled: boolean;
-  last_pong_s_ago: number;
   last_activity_s_ago: number;
   session_duration_s: number | null;
   peer_app_version: string | null;
@@ -280,12 +279,6 @@ const DeveloperSection = () => {
               <span style={{ color: 'var(--text-muted)' }}>Being controlled</span>
               <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
                 {dbg.is_controlled ? 'yes' : 'no'}
-              </span>
-            </div>
-            <div className="flex items-center">
-              <span style={{ color: 'var(--text-muted)' }}>Last Pong</span>
-              <span className="ml-auto font-mono" style={{ color: dbg.last_pong_s_ago > 10 ? 'var(--danger)' : 'var(--text-secondary)' }}>
-                {dbg.last_pong_s_ago}s ago
               </span>
             </div>
             <div className="flex items-center">

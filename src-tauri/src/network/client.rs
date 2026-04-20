@@ -88,11 +88,6 @@ pub async fn connect(
             if let Err(e) = s.set_nodelay(true) {
                 tracing::warn!("set_nodelay failed on {}: {}", addr, e);
             }
-            // Enable TCP keepalive so a silently-dead peer is detected in
-            // ~45s rather than the kernel default ~2h. Must be applied
-            // BEFORE into_split() (called later in connect_stream) because
-            // the split halves don't expose the file descriptor.
-            crate::network::tune_session_socket(&s);
             s
         }
         Ok(Err(e)) => {
@@ -354,40 +349,6 @@ pub async fn connect_stream(
         }
     });
 
-    // Pong watchdog. The client sends a Ping every 5s above; the peer replies
-    // with a Pong that bumps `state.last_pong` in the read loop below. If
-    // three consecutive Pongs fail to arrive (15s window), we treat the peer
-    // as frozen and tear down the session. This catches the case where TCP
-    // keepalive (Phase C) reports the socket as "alive" — e.g. the peer's
-    // process is stalled but its kernel still answers keepalive probes —
-    // and the writer task looks fine but no meaningful messages flow back.
-    //
-    // `state.last_pong` is reset at `state.start_session()` to prevent a
-    // stale pre-session timestamp from firing the watchdog on reconnect.
-    let state_pongwatch = state.clone();
-    let pongwatch_peer_id = peer.id.clone();
-    let pong_watchdog = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            if state_pongwatch.net_tx.lock().is_none() { break; }
-            let elapsed = state_pongwatch.last_pong.lock().elapsed();
-            if elapsed.as_secs() >= 15 {
-                tracing::warn!(
-                    peer_id = %pongwatch_peer_id,
-                    elapsed_s = elapsed.as_secs(),
-                    "client pong watchdog: no Pong in 15s (peer frozen or TCP half-open) — tearing down session"
-                );
-                // Drop net_tx so the writer task exits; that in turn closes
-                // our write half, which gives the peer TCP FIN and lets
-                // the read loop fall through to cleanup.
-                *state_pongwatch.net_tx.lock() = None;
-                break;
-            }
-        }
-    });
-
     // Single-threaded read loop — never cancelled mid-read. On stream close
     // read_enc_message returns None and we fall through to cleanup.
     let peer_id_ping = peer.id.clone();
@@ -417,9 +378,6 @@ pub async fn connect_stream(
                 break;
             }
             Message::Pong { ts } => {
-                // Bump liveness clock BEFORE doing any other work so a slow
-                // lock-contended peers update doesn't starve the watchdog.
-                *state.last_pong.lock() = std::time::Instant::now();
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -515,12 +473,8 @@ pub async fn connect_stream(
         ));
     }
 
-    // Stop the ping + pong-watchdog tasks so they don't outlive the session.
-    // Both must be aborted on every exit path (Bye, EndedByPeer, ReturnToSender,
-    // read-EOF, writer-dead) — this cleanup runs unconditionally after the
-    // read loop.
+    // Stop the ping task so it doesn't outlive the session.
     ping_task.abort();
-    pong_watchdog.abort();
 
     {
         let mut peers = state.peers.lock();
@@ -619,7 +573,6 @@ fn reconnect_with_backoff(
                     if let Err(e) = s.set_nodelay(true) {
                         tracing::warn!("set_nodelay failed on {}: {}", addr, e);
                     }
-                    crate::network::tune_session_socket(&s);
                     s
                 }
                 Ok(Err(e)) => {
