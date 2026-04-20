@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "multimouse"
-version = "0.3.18"
+version = "0.3.19"
 dependencies = [
  "arboard",
  "base64 0.22.1",

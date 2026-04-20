@@ -1,10 +1,18 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 export const TitleBar = () => {
-  // Use the Rust `hide_window` command so the activation-policy flip (macOS
-  // Regular → Accessory) happens in sync with the window hiding. Calling
-  // getCurrentWindow().hide() directly leaves the app showing in the dock.
+  // Close = hide to tray via the Rust command (activation-policy flip
+  // kept in sync with hide on macOS — bare window.hide() leaves the
+  // app showing in the dock).
   const close = () => invoke('hide_window').catch(() => {});
+  // v0.3.19 — Minimize just calls window.minimize(). That sends the
+  // window to the Dock / taskbar without hiding to tray, and does NOT
+  // touch the session — capture/inject threads are independent of
+  // webview visibility.
+  const minimize = () => {
+    getCurrentWindow().minimize().catch(() => {});
+  };
 
   return (
     <div
@@ -34,7 +42,28 @@ export const TitleBar = () => {
 
       <div className="flex items-center gap-0.5">
         <button
+          onClick={minimize}
+          title="Minimize (session stays connected)"
+          aria-label="Minimize window"
+          className="w-8 h-8 rounded-xl flex items-center justify-center transition-all"
+          style={{ color: 'var(--text-muted)' }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.background = 'var(--bg-hover)';
+            (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-secondary)';
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+            (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-muted)';
+          }}
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+          </svg>
+        </button>
+        <button
           onClick={close}
+          title="Hide to tray (session stays connected)"
+          aria-label="Close window to tray"
           className="w-8 h-8 rounded-xl flex items-center justify-center transition-all"
           style={{ color: 'var(--text-muted)' }}
           onMouseEnter={(e) => {
