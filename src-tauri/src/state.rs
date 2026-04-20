@@ -109,6 +109,16 @@ pub struct Settings {
     /// for normal users.
     #[serde(default)]
     pub developer_mode: bool,
+    /// v0.3.18+ — when true (default), the peer-version-newer banner +
+    /// the manual "Check for update" button in Settings → About behave
+    /// as before. When false, both are suppressed — useful on
+    /// ad-hoc-signed macOS builds where every update re-breaks
+    /// Accessibility permission (the permanent fix is an Apple
+    /// Developer ID; this is the user-side workaround until then).
+    /// The Tauri auto-updater itself never checks on its own — these
+    /// are the only nag paths, so the flag covers all of them.
+    #[serde(default = "default_updates_enabled")]
+    pub updates_enabled: bool,
 }
 
 fn default_edge_dwell_ms() -> u32 { 150 }
@@ -117,6 +127,7 @@ fn default_privacy_blur() -> bool { true }
 fn default_hide_cursor_during_relay() -> bool { true }
 fn default_auto_gaming_mode() -> bool { true }
 fn default_mouse_sensitivity() -> f64 { 1.0 }
+fn default_updates_enabled() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -137,6 +148,7 @@ impl Default for Settings {
             switch_hotkeys: Vec::new(),
             mouse_sensitivity: 1.0,
             developer_mode: false,
+            updates_enabled: true,
         }
     }
 }

@@ -49,6 +49,9 @@ export interface Settings {
   /** v0.3.11+ — reveals Settings → Developer and enables cross-PC diag
    *  sync. Off by default. */
   developer_mode: boolean;
+  /** v0.3.18+ — when false, suppresses the peer-version-newer banner
+   *  and the Settings → About manual update check. Default true. */
+  updates_enabled: boolean;
 }
 
 export interface PairingRequest {

@@ -185,7 +185,12 @@ export default function App() {
     const unlisten = Promise.all([
       listen<string>('peer-version', async (e) => {
         // Compare to our own app version; nudge only if the peer is ahead.
+        // v0.3.18 — respects the `updates_enabled` toggle so users who
+        // have deliberately pinned to an older working version aren't
+        // repeatedly nagged every time the peer connects.
         try {
+          const settings = useStore.getState().settings;
+          if (settings && settings.updates_enabled === false) return;
           const { getVersion } = await import('@tauri-apps/api/app');
           const ours = await getVersion();
           const peer = (e.payload ?? '').trim();

@@ -2262,6 +2262,14 @@ export const SettingsPage = () => {
         }
       >
         <Row>
+          <Toggle
+            label="Allow update checks"
+            description="When off, this device won't prompt you to update even if the peer is on a newer version. Useful on ad-hoc-signed macOS builds where every update re-breaks Accessibility."
+            checked={settings.updates_enabled ?? true}
+            onChange={(v) => update({ updates_enabled: v })}
+          />
+        </Row>
+        <Row>
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>MultiMouse</p>
@@ -2271,7 +2279,8 @@ export const SettingsPage = () => {
             </div>
             <button
               onClick={checkUpdate}
-              disabled={checkingUpdate}
+              disabled={checkingUpdate || (settings.updates_enabled === false)}
+              title={settings.updates_enabled === false ? 'Enable "Allow update checks" above to use this' : undefined}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-50 flex-shrink-0"
               style={{
                 background: 'var(--accent-soft-bg)',
