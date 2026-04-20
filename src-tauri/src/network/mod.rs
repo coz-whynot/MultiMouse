@@ -74,10 +74,17 @@ pub(crate) async fn read_log_tail_capped() -> String {
 }
 
 pub(crate) fn tune_session_socket(stream: &tokio::net::TcpStream) {
+    // `with_retries` (TCP_KEEPCNT) is only exposed on Unix targets by
+    // socket2 — on Windows the WSAIoctl(SIO_KEEPALIVE_VALS) API takes
+    // only idle + interval, so socket2 omits the method entirely and
+    // calling it fails to compile. Gate it with cfg so Windows gets a
+    // valid keepalive config (just idle + interval, which is what the
+    // OS accepts) while Unix gets the full triple.
     let keepalive = socket2::TcpKeepalive::new()
         .with_time(Duration::from_secs(30))
-        .with_interval(Duration::from_secs(5))
-        .with_retries(3);
+        .with_interval(Duration::from_secs(5));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let keepalive = keepalive.with_retries(3);
     let sock_ref = socket2::SockRef::from(stream);
     if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
         tracing::warn!(err = ?e, "tune_session_socket: set_tcp_keepalive failed; session continues without keepalive");
