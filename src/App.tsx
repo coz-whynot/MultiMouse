@@ -69,6 +69,22 @@ export default function App() {
   // the UI mounts.
   const [inputGrabOk, setInputGrabOk] = useState<boolean>(true);
   const [permBusy, setPermBusy] = useState(false);
+  // v0.3.13 — when true, the permissions banner expands to show a
+  // platform-specific step-by-step for granting the permission and
+  // restarting the app. Defaults open so users see the guide without
+  // having to click first.
+  const [permStepsOpen, setPermStepsOpen] = useState(true);
+  // Detect platform on mount so the banner shows the right steps.
+  // Falls back to macOS copy if the user agent doesn't expose platform
+  // (some Tauri webview builds return empty).
+  const [permPlatform, setPermPlatform] = useState<'macos' | 'windows' | 'linux'>(
+    () => {
+      const ua = navigator.userAgent || '';
+      if (/Windows/i.test(ua)) return 'windows';
+      if (/Linux/i.test(ua) && !/Android/i.test(ua)) return 'linux';
+      return 'macos';
+    }
+  );
   // v0.3.8 Phase F — inbound log-pull request from the peer. When set, a
   // modal asks the local user "<requester> is requesting your diagnostic
   // logs; share?". Accept/reject both invoke the corresponding Rust command
@@ -295,7 +311,12 @@ export default function App() {
         setLogRequestFromPeer(e.payload);
       }),
       // v0.3.12 — capture.rs emits this on boot when rdev::grab fails.
-      listen('accessibility-needed', () => setInputGrabOk(false)),
+      // Payload shape: { platform: "macos" | "windows" | "linux" }.
+      listen<{ platform?: string }>('accessibility-needed', (e) => {
+        setInputGrabOk(false);
+        const p = e.payload?.platform;
+        if (p === 'macos' || p === 'windows' || p === 'linux') setPermPlatform(p);
+      }),
       listen('tauri://drag', () => setDraggingFiles(true)),
       listen('tauri://drag-leave', () => setDraggingFiles(false)),
       listen('tauri://drag-cancelled', () => setDraggingFiles(false)),
@@ -519,10 +540,11 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Permissions banner (v0.3.12) — shown when rdev::grab was
-          denied at startup. One-click opens the right System Settings
-          pane; on macOS it's Accessibility first, then a second button
-          for Input Monitoring (both are needed). */}
+      {/* Permissions banner (v0.3.12, expanded in v0.3.13). Shown when
+          rdev::grab was denied at startup. Header row has the
+          open-settings buttons; expandable body shows platform-specific
+          step-by-step so the user doesn't have to guess the 5 manual
+          clicks that come AFTER the pane opens. */}
       <AnimatePresence>
         {!inputGrabOk && (
           <motion.div
@@ -532,45 +554,113 @@ export default function App() {
             className="mx-5 mt-1 overflow-hidden"
           >
             <div
-              className="rounded-xl px-3 py-2.5 flex items-center gap-2.5 mb-1 flex-wrap"
+              className="rounded-xl px-3 py-2.5 mb-1"
               style={{
                 background: 'rgba(251,191,36,0.08)',
                 border: '1px solid rgba(251,191,36,0.24)',
               }}
             >
-              <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="#fbbf24" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round"
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-              </svg>
-              <p className="text-[11px] flex-1 min-w-0" style={{ color: '#fcd34d' }}>
-                Input permissions missing. MultiMouse can't move the cursor or read keys until you grant Accessibility + Input Monitoring (macOS) or Input devices (Windows), then restart the app.
-              </p>
-              <button
-                disabled={permBusy}
-                onClick={async () => {
-                  setPermBusy(true);
-                  try { await invoke('open_input_permissions', { which: 'accessibility' }); }
-                  catch {}
-                  finally { setPermBusy(false); }
-                }}
-                className="flex-shrink-0 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-60"
-                style={{ background: 'rgba(251,191,36,0.16)', border: '1px solid rgba(251,191,36,0.3)', color: '#fde68a' }}
-              >
-                Accessibility
-              </button>
-              <button
-                disabled={permBusy}
-                onClick={async () => {
-                  setPermBusy(true);
-                  try { await invoke('open_input_permissions', { which: 'input_monitoring' }); }
-                  catch {}
-                  finally { setPermBusy(false); }
-                }}
-                className="flex-shrink-0 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-60"
-                style={{ background: 'rgba(251,191,36,0.16)', border: '1px solid rgba(251,191,36,0.3)', color: '#fde68a' }}
-              >
-                Input Monitoring
-              </button>
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="#fbbf24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round"
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <p className="text-[11px] flex-1 min-w-0" style={{ color: '#fcd34d' }}>
+                  {permPlatform === 'windows'
+                    ? "Input hook denied. MultiMouse can't read keys or drive the cursor until Windows grants input access, then restart the app."
+                    : permPlatform === 'linux'
+                    ? "Input capture isn't fully available on this Linux setup. MultiMouse falls back to listen-only — cross-device input will still work but cursor consume is disabled."
+                    : "macOS Accessibility + Input Monitoring are needed. MultiMouse can't move the cursor or read keys until you grant both and restart the app."}
+                </p>
+                {permPlatform === 'macos' && (
+                  <>
+                    <button
+                      disabled={permBusy}
+                      onClick={async () => {
+                        setPermBusy(true);
+                        try { await invoke('open_input_permissions', { which: 'accessibility' }); }
+                        catch {} finally { setPermBusy(false); }
+                      }}
+                      className="flex-shrink-0 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-60"
+                      style={{ background: 'rgba(251,191,36,0.16)', border: '1px solid rgba(251,191,36,0.3)', color: '#fde68a' }}
+                    >
+                      Open Accessibility
+                    </button>
+                    <button
+                      disabled={permBusy}
+                      onClick={async () => {
+                        setPermBusy(true);
+                        try { await invoke('open_input_permissions', { which: 'input_monitoring' }); }
+                        catch {} finally { setPermBusy(false); }
+                      }}
+                      className="flex-shrink-0 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-60"
+                      style={{ background: 'rgba(251,191,36,0.16)', border: '1px solid rgba(251,191,36,0.3)', color: '#fde68a' }}
+                    >
+                      Open Input Monitoring
+                    </button>
+                  </>
+                )}
+                {permPlatform === 'windows' && (
+                  <button
+                    disabled={permBusy}
+                    onClick={async () => {
+                      setPermBusy(true);
+                      try { await invoke('open_input_permissions', { which: 'accessibility' }); }
+                      catch {} finally { setPermBusy(false); }
+                    }}
+                    className="flex-shrink-0 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-60"
+                    style={{ background: 'rgba(251,191,36,0.16)', border: '1px solid rgba(251,191,36,0.3)', color: '#fde68a' }}
+                  >
+                    Open Privacy settings
+                  </button>
+                )}
+                <button
+                  onClick={() => setPermStepsOpen((v) => !v)}
+                  className="flex-shrink-0 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all"
+                  style={{ color: '#fde68a', opacity: 0.8 }}
+                >
+                  {permStepsOpen ? 'Hide steps' : 'Show steps'}
+                </button>
+              </div>
+
+              <AnimatePresence>
+                {permStepsOpen && (
+                  <motion.ol
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="mt-2 pl-5 text-[11px] leading-relaxed space-y-1"
+                    style={{ color: '#fde68a', listStyle: 'decimal' }}
+                  >
+                    {permPlatform === 'macos' && (
+                      <>
+                        <li>Click <b>Open Accessibility</b> above → System Settings opens.</li>
+                        <li>If MultiMouse is already listed, click <b>–</b> to remove it first (an older install leaves a stale entry).</li>
+                        <li>Click the <b>+</b> button, pick <code>/Applications/MultiMouse.app</code>, and toggle it <b>on</b>.</li>
+                        <li>Click <b>Open Input Monitoring</b> above and repeat the add/toggle for MultiMouse there too.</li>
+                        <li>Quit MultiMouse from the <b>tray icon → Quit</b> (closing the window isn't enough — the process runs in the background).</li>
+                        <li>Reopen MultiMouse from Applications. The banner should disappear.</li>
+                      </>
+                    )}
+                    {permPlatform === 'windows' && (
+                      <>
+                        <li>Click <b>Open Privacy settings</b> above.</li>
+                        <li>Look for input / keyboard / mouse access sections and make sure apps are allowed to access these.</li>
+                        <li>If Windows Defender / an anti-virus prompted about MultiMouse's input hook on first launch and you clicked Block, you'll need to allow it via the Defender history.</li>
+                        <li>Right-click the MultiMouse tray icon → <b>Quit</b>.</li>
+                        <li>Reopen MultiMouse. The banner should disappear.</li>
+                      </>
+                    )}
+                    {permPlatform === 'linux' && (
+                      <>
+                        <li>No action required — the app is running in listen-only mode.</li>
+                        <li>Input relay still works across devices; you just won't be able to consume keys on the receiving side.</li>
+                        <li>For full grab on Linux you'd need a distro / compositor with the rdev <code>unstable_grab</code> path enabled, which isn't shipped in this build.</li>
+                      </>
+                    )}
+                  </motion.ol>
+                )}
+              </AnimatePresence>
             </div>
           </motion.div>
         )}
