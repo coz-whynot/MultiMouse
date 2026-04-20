@@ -74,6 +74,11 @@ export default function App() {
   // restarting the app. Defaults open so users see the guide without
   // having to click first.
   const [permStepsOpen, setPermStepsOpen] = useState(true);
+  // v0.3.14 — session-scoped dismissal. Clicking the × hides the banner
+  // until the next app launch; NOT persisted because permanently
+  // suppressing a "your input hook is dead" warning is worse UX than
+  // the banner itself.
+  const [permDismissed, setPermDismissed] = useState(false);
   // Detect platform on mount so the banner shows the right steps.
   // Falls back to macOS copy if the user agent doesn't expose platform
   // (some Tauri webview builds return empty).
@@ -546,7 +551,7 @@ export default function App() {
           step-by-step so the user doesn't have to guess the 5 manual
           clicks that come AFTER the pane opens. */}
       <AnimatePresence>
-        {!inputGrabOk && (
+        {!inputGrabOk && !permDismissed && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
@@ -620,6 +625,17 @@ export default function App() {
                   style={{ color: '#fde68a', opacity: 0.8 }}
                 >
                   {permStepsOpen ? 'Hide steps' : 'Show steps'}
+                </button>
+                <button
+                  onClick={() => setPermDismissed(true)}
+                  title="Hide this banner for this session"
+                  aria-label="Dismiss permissions banner"
+                  className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center transition-colors"
+                  style={{ color: 'rgba(253,224,110,0.55)' }}
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
                 </button>
               </div>
 
