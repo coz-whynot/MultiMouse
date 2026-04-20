@@ -181,6 +181,196 @@ type DebugState = {
   bytes_out: number;
 };
 
+/* v0.3.16 — Version history: lists every published release from the
+   GitHub API and lets the user download any older (or newer) installer
+   for the current platform into ~/Downloads. Double-click to install.
+   Tauri's built-in updater refuses to downgrade, so this sidesteps it
+   for version-pinning / rollback use cases. */
+type ReleaseRow = {
+  tag_name: string;
+  name: string;
+  published_at: string;
+  is_current: boolean;
+  install_asset: string | null;
+  install_asset_size: number | null;
+};
+type ReleasesResponse = {
+  current_version: string;
+  releases: ReleaseRow[];
+};
+
+const VersionHistorySection = () => {
+  const [data, setData] = useState<ReleasesResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busyTag, setBusyTag] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const flash = (kind: 'ok' | 'err', text: string) => {
+    setStatus({ kind, text });
+    window.setTimeout(() => setStatus(null), 6000);
+  };
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await invoke<ReleasesResponse>('list_releases');
+      setData(r);
+    } catch (e) {
+      setError(String(e));
+    } finally { setLoading(false); }
+  };
+
+  const formatBytes = (n: number | null): string => {
+    if (!n) return '';
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const formatDate = (iso: string): string => {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch { return iso; }
+  };
+
+  return (
+    <Section
+      title="Version history"
+      className="lg:col-span-2"
+      icon={
+        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round"
+            d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+      }
+    >
+      <Row noDivider>
+        <p className="text-[11px] mb-3 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+          Any published build on GitHub — install an older one if a recent update misbehaved, or re-download the current build. Installer saves to <b>~/Downloads</b> and reveals in Finder; double-click to install, then quit + reopen MultiMouse.
+        </p>
+
+        {!data && !loading && !error && (
+          <button
+            onClick={load}
+            className="px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95"
+            style={{
+              background: 'var(--accent-soft-bg)',
+              border: '1px solid var(--accent-soft-br)',
+              color: 'var(--accent-primary)',
+            }}
+          >
+            Load releases
+          </button>
+        )}
+
+        {loading && (
+          <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>Loading releases…</p>
+        )}
+
+        {error && (
+          <div>
+            <p className="text-[11px] mb-2" style={{ color: 'var(--danger)' }}>
+              {error}
+            </p>
+            <button
+              onClick={load}
+              className="px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95"
+              style={{
+                background: 'var(--bg-subtle)',
+                border: '1px solid var(--border-subtle)',
+                color: 'var(--text-muted)',
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {data && (
+          <div
+            className="rounded-xl overflow-hidden max-h-72 overflow-y-auto"
+            style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-subtle)' }}
+          >
+            {data.releases.map((r, i) => (
+              <div
+                key={r.tag_name}
+                className="flex items-center gap-3 px-3 py-2"
+                style={{
+                  borderBottom: i === data.releases.length - 1 ? 'none' : '1px solid var(--divider)',
+                  background: r.is_current ? 'var(--accent-soft-bg)' : 'transparent',
+                }}
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                    {r.name || r.tag_name}
+                    {r.is_current && (
+                      <span
+                        className="ml-2 text-[10px] font-bold px-1.5 py-0.5 rounded"
+                        style={{ background: 'var(--accent-primary)', color: 'white' }}
+                      >
+                        RUNNING
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
+                    {formatDate(r.published_at)}
+                    {r.install_asset && <span> · {formatBytes(r.install_asset_size)}</span>}
+                  </p>
+                </div>
+                {r.install_asset ? (
+                  <button
+                    disabled={busyTag !== null}
+                    onClick={async () => {
+                      setBusyTag(r.tag_name);
+                      try {
+                        const p = await invoke<string>('download_release_asset', {
+                          tag: r.tag_name,
+                          assetName: r.install_asset,
+                        });
+                        flash('ok', `Saved ${p.split('/').pop() ?? p} to Downloads — open it to install`);
+                      } catch (e) {
+                        flash('err', String(e));
+                      } finally { setBusyTag(null); }
+                    }}
+                    className="flex-shrink-0 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40"
+                    style={{
+                      background: 'var(--accent-soft-bg)',
+                      border: '1px solid var(--accent-soft-br)',
+                      color: 'var(--accent-primary)',
+                    }}
+                  >
+                    {busyTag === r.tag_name ? 'Downloading…' : r.is_current ? 'Redownload' : 'Download'}
+                  </button>
+                ) : (
+                  <span className="flex-shrink-0 text-[10px]" style={{ color: 'var(--text-ghost)' }}>
+                    no installer for this platform
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <AnimatePresence>
+          {status && (
+            <motion.p
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="text-[11px] mt-2.5 leading-relaxed"
+              style={{ color: status.kind === 'ok' ? 'var(--success)' : 'var(--danger)' }}
+            >
+              {status.text}
+            </motion.p>
+          )}
+        </AnimatePresence>
+      </Row>
+    </Section>
+  );
+};
+
 const DeveloperSection = () => {
   const { status: appStatus } = useStore();
   const connectedPeer = appStatus?.connected_peer ?? null;
@@ -1927,6 +2117,9 @@ export const SettingsPage = () => {
 
       {/* ── Developer tools (v0.3.9+) ── only when the toggle is on */}
       {settings.developer_mode && <DeveloperSection />}
+
+      {/* ── Version history (v0.3.16) ── */}
+      <VersionHistorySection />
 
       {/* ── About ── */}
       <Section

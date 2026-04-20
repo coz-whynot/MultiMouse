@@ -1,6 +1,6 @@
 [package]
 name = "multimouse"
-version = "0.3.15"
+version = "0.3.16"
 description = "Share mouse and keyboard across devices"
 authors = ["MultiMouse Contributors"]
 license = "MIT"
@@ -49,6 +49,12 @@ sha2 = "0.10"
 sha1 = "0.10"
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
+# v0.3.16: direct HTTP client so the new list_releases + download_release
+# commands can talk to the GitHub Releases API and download prior build
+# artifacts without depending on tauri-plugin-updater internals.
+# Features: rustls-tls so we don't require system OpenSSL; json for
+# de-serializing the releases list; stream for chunked download progress.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 subtle = "2"
 

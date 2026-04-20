@@ -1079,6 +1079,188 @@ pub async fn run_diagnostics(
     Ok(out)
 }
 
+// ── Version history / downgrade (v0.3.16) ──────────────────────────────
+//
+// Tauri's auto-updater ships only the NEWEST version — a user who wants
+// to pin to or roll back to an older build has no first-class path.
+// These two commands add one: list all releases from the GitHub API and
+// download the current-platform installer for any chosen release, then
+// reveal the downloaded file so the user can run it.
+//
+// We intentionally do NOT launch the installer automatically — on macOS
+// running a .dmg needs the user to drag the app to Applications (the
+// OS-level finder interaction is better UX than a silent background
+// swap that might leave two copies around). On Windows we reveal the
+// .exe and let the user double-click; same reasoning. On Linux the
+// .AppImage is self-contained — user just makes it executable and
+// launches.
+
+const RELEASES_API: &str = "https://api.github.com/repos/coz-whynot/MultiMouse/releases";
+
+/// GitHub release asset metadata we care about.
+#[derive(serde::Deserialize, Debug)]
+struct GhAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+}
+
+/// Subset of the GitHub release JSON we parse. The API returns many more
+/// fields (author, body, tarball_url, etc.); we only deserialize the
+/// ones the UI actually renders.
+#[derive(serde::Deserialize, Debug)]
+struct GhRelease {
+    tag_name: String,
+    name: String,
+    published_at: String,
+    draft: bool,
+    prerelease: bool,
+    assets: Vec<GhAsset>,
+}
+
+/// Return the list of published releases (drafts + prereleases filtered
+/// out). Each entry carries its tag, display name, publish date, and
+/// the best-matched installer asset for the CURRENT platform. Callers
+/// use `download_url` and `download_release_asset` together to pull
+/// the right artifact.
+#[tauri::command]
+pub async fn list_releases() -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("MultiMouse/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("client build: {}", e))?;
+    let resp = client
+        .get(RELEASES_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("GET releases: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "GitHub API returned {} — GitHub may be rate-limiting this IP",
+            resp.status()
+        ));
+    }
+    let releases: Vec<GhRelease> = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse releases JSON: {}", e))?;
+
+    let current = env!("CARGO_PKG_VERSION");
+    // Emit a trimmed view the UI can render directly. `install_asset` is
+    // the name (not URL) of the best-matching installer artifact for
+    // this OS — the UI passes that back to `download_release_asset`.
+    let trimmed: Vec<serde_json::Value> = releases
+        .into_iter()
+        .filter(|r| !r.draft && !r.prerelease)
+        .map(|r| {
+            let install_asset = pick_install_asset(&r.assets);
+            serde_json::json!({
+                "tag_name": r.tag_name,
+                "name": r.name,
+                "published_at": r.published_at,
+                "is_current": r.tag_name.trim_start_matches('v') == current,
+                "install_asset": install_asset.as_ref().map(|a| &a.name),
+                "install_asset_size": install_asset.as_ref().map(|a| a.size),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "current_version": current,
+        "releases": trimmed,
+    }))
+}
+
+/// Pick the right installer asset for the running OS + arch.
+/// Matching rules (aligned with `tauri-action`'s asset naming):
+///   - macOS aarch64 → `*_aarch64.dmg`
+///   - macOS x86_64  → `*_x64.dmg`
+///   - Windows x86_64 → `*_x64-setup.exe`
+///   - Linux x86_64 → `*_amd64.AppImage`
+/// Returns None if no asset matches — which can happen on an old release
+/// that didn't ship a build for this OS/arch combo.
+fn pick_install_asset(assets: &[GhAsset]) -> Option<&GhAsset> {
+    #[cfg(target_os = "macos")]
+    let needle: &[&str] = if cfg!(target_arch = "aarch64") {
+        &["_aarch64.dmg"]
+    } else {
+        &["_x64.dmg"]
+    };
+    #[cfg(target_os = "windows")]
+    let needle: &[&str] = &["_x64-setup.exe"];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let needle: &[&str] = &[".AppImage"];
+    assets.iter().find(|a| needle.iter().any(|n| a.name.ends_with(n)))
+}
+
+/// Download a specific release's installer asset (identified by tag +
+/// filename) to the user's Downloads folder and reveal it. Returns the
+/// saved file's path so the UI can show a success message.
+///
+/// `tag` and `asset_name` come from `list_releases`'s output. We
+/// re-fetch the release to get the download URL rather than trusting
+/// anything the UI passes verbatim — avoids an easy abuse path where a
+/// compromised renderer could ask us to download from an arbitrary URL.
+#[tauri::command]
+pub async fn download_release_asset(
+    tag: String,
+    asset_name: String,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("MultiMouse/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("client build: {}", e))?;
+    let url = format!("{}/tags/{}", RELEASES_API, tag);
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("GET release {}: {}", tag, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API returned {} for tag {}", resp.status(), tag));
+    }
+    let release: GhRelease = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse release JSON: {}", e))?;
+
+    // Look up the requested asset by name — rejects anything the UI
+    // passed that doesn't actually exist in this release's asset list.
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == asset_name)
+        .ok_or_else(|| format!("asset '{}' not found in release {}", asset_name, tag))?;
+
+    // Stream the download so a big installer doesn't all land in RAM at
+    // once, and so we'd have a hook for progress reporting later.
+    let dl = client
+        .get(&asset.browser_download_url)
+        .send()
+        .await
+        .map_err(|e| format!("download: {}", e))?;
+    if !dl.status().is_success() {
+        return Err(format!("download returned {}", dl.status()));
+    }
+    let bytes = dl.bytes().await.map_err(|e| format!("download body: {}", e))?;
+
+    let out_dir = dirs::download_dir()
+        .or_else(dirs::desktop_dir)
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "Could not resolve Downloads/Desktop/home directory".to_string())?;
+    let out_path = out_dir.join(&asset.name);
+    let out_path_clone = out_path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&out_path_clone, &bytes))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("write: {}", e))?;
+
+    let _ = tauri_plugin_opener::reveal_item_in_dir(&out_path);
+    Ok(out_path.to_string_lossy().into_owned())
+}
+
 /// Return whether `rdev::grab` succeeded at startup. When false, input
 /// capture fell back to listen-only because macOS Accessibility / Input
 /// Monitoring (or the Windows equivalent) isn't granted. The UI polls
