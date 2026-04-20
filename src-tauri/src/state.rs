@@ -285,6 +285,12 @@ pub struct AppState {
     pub session_start: Mutex<Option<std::time::Instant>>,
     /// Last time we observed remote-input activity (used by idle auto-lock)
     pub last_activity: Mutex<std::time::Instant>,
+    /// v0.3.12+ — set to true when `rdev::grab` succeeded at startup, false
+    /// if it fell back to listen-only because macOS Accessibility / Input
+    /// Monitoring wasn't granted (or the Windows equivalent denied). Exposed
+    /// to the UI so it can show a one-click "Open Accessibility settings"
+    /// banner instead of the app silently malfunctioning.
+    pub input_grab_ok: std::sync::atomic::AtomicBool,
     /// v0.3.8+ cross-device log pull. Oneshot channel set by the UI layer
     /// when the local user asks to pull peer logs; resolved by the read
     /// loop when the peer's `LogShare` reply arrives (or on timeout). Only
@@ -411,6 +417,7 @@ impl AppState {
             bytes_received: std::sync::atomic::AtomicU64::new(0),
             session_start: Mutex::new(None),
             last_activity: Mutex::new(Instant::now()),
+            input_grab_ok: std::sync::atomic::AtomicBool::new(true),
             pending_log_pull: Mutex::new(None),
             pending_log_request: Mutex::new(None),
             last_log_request: Mutex::new(None),

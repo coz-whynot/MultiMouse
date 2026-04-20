@@ -342,6 +342,8 @@ pub fn run() {
             commands::run_diagnostics,
             commands::pull_peer_dev_state,
             commands::get_peer_dev_state,
+            commands::get_input_grab_status,
+            commands::open_input_permissions,
             hide_window,
         ])
         .on_window_event(|window, event| {

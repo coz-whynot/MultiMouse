@@ -62,6 +62,13 @@ export default function App() {
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [reconnectState, setReconnectState] = useState<ReconnectState | null>(null);
   const [idleLockMsg, setIdleLockMsg] = useState<string | null>(null);
+  // v0.3.12 — true when the platform denied rdev::grab at startup
+  // (missing Accessibility / Input Monitoring on macOS, or the Windows
+  // equivalent). Polled once on mount AND updated via the
+  // `accessibility-needed` event for races where the event fires before
+  // the UI mounts.
+  const [inputGrabOk, setInputGrabOk] = useState<boolean>(true);
+  const [permBusy, setPermBusy] = useState(false);
   // v0.3.8 Phase F — inbound log-pull request from the peer. When set, a
   // modal asks the local user "<requester> is requesting your diagnostic
   // logs; share?". Accept/reject both invoke the corresponding Rust command
@@ -75,6 +82,15 @@ export default function App() {
   useEffect(() => {
     peersRef.current = peers;
   }, [peers]);
+
+  // v0.3.12 — poll input_grab status once on mount so the banner
+  // appears even when the UI mounts AFTER capture.rs has already
+  // emitted its one-shot `accessibility-needed` event at startup.
+  useEffect(() => {
+    invoke<boolean>('get_input_grab_status')
+      .then((ok) => setInputGrabOk(ok))
+      .catch(() => {});
+  }, []);
   // Tracks the most recent push-event timestamp so the 3s poll can avoid
   // overwriting event-driven state during narrow transition windows. When a
   // focus/relay/connection event fires and then the poll reads the backend
@@ -278,6 +294,8 @@ export default function App() {
       listen<{ requester_name: string }>('log-request-received', (e) => {
         setLogRequestFromPeer(e.payload);
       }),
+      // v0.3.12 — capture.rs emits this on boot when rdev::grab fails.
+      listen('accessibility-needed', () => setInputGrabOk(false)),
       listen('tauri://drag', () => setDraggingFiles(true)),
       listen('tauri://drag-leave', () => setDraggingFiles(false)),
       listen('tauri://drag-cancelled', () => setDraggingFiles(false)),
@@ -495,6 +513,63 @@ export default function App() {
                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                 </svg>
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Permissions banner (v0.3.12) — shown when rdev::grab was
+          denied at startup. One-click opens the right System Settings
+          pane; on macOS it's Accessibility first, then a second button
+          for Input Monitoring (both are needed). */}
+      <AnimatePresence>
+        {!inputGrabOk && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mx-5 mt-1 overflow-hidden"
+          >
+            <div
+              className="rounded-xl px-3 py-2.5 flex items-center gap-2.5 mb-1 flex-wrap"
+              style={{
+                background: 'rgba(251,191,36,0.08)',
+                border: '1px solid rgba(251,191,36,0.24)',
+              }}
+            >
+              <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="#fbbf24" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round"
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <p className="text-[11px] flex-1 min-w-0" style={{ color: '#fcd34d' }}>
+                Input permissions missing. MultiMouse can't move the cursor or read keys until you grant Accessibility + Input Monitoring (macOS) or Input devices (Windows), then restart the app.
+              </p>
+              <button
+                disabled={permBusy}
+                onClick={async () => {
+                  setPermBusy(true);
+                  try { await invoke('open_input_permissions', { which: 'accessibility' }); }
+                  catch {}
+                  finally { setPermBusy(false); }
+                }}
+                className="flex-shrink-0 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-60"
+                style={{ background: 'rgba(251,191,36,0.16)', border: '1px solid rgba(251,191,36,0.3)', color: '#fde68a' }}
+              >
+                Accessibility
+              </button>
+              <button
+                disabled={permBusy}
+                onClick={async () => {
+                  setPermBusy(true);
+                  try { await invoke('open_input_permissions', { which: 'input_monitoring' }); }
+                  catch {}
+                  finally { setPermBusy(false); }
+                }}
+                className="flex-shrink-0 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-60"
+                style={{ background: 'rgba(251,191,36,0.16)', border: '1px solid rgba(251,191,36,0.3)', color: '#fde68a' }}
+              >
+                Input Monitoring
               </button>
             </div>
           </motion.div>

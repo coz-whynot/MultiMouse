@@ -341,6 +341,12 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
             });
             if let Err(e) = result {
                 tracing::warn!("rdev::grab unavailable ({:?}), using listen fallback", e);
+                // v0.3.12: record the failure on state so the UI can poll
+                // it at any time and show the permissions banner — the
+                // `accessibility-needed` event below only reaches a webview
+                // that already mounted its listener, which is racy at app
+                // startup.
+                state.input_grab_ok.store(false, std::sync::atomic::Ordering::SeqCst);
                 let platform = if cfg!(target_os = "macos") { "macos" }
                                else if cfg!(target_os = "windows") { "windows" }
                                else { "linux" };
@@ -501,45 +507,25 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
             }
         }
 
-        // If this device is currently being CONTROLLED by a peer (state.is_controlled),
-        // two paths let the receiver take back their machine:
-        //   1. Escape key — explicit escape hatch
-        //   2. ANY native user input (key press, mouse button) that wasn't just
-        //      echoed back from our own injection — signals "I'm trying to use
-        //      this machine myself" and drops the session.
-        // We can't send a message back (server-side has no net_tx), so we break
-        // the connection entirely; the controller's client sees disconnect.
+        // While this device is being CONTROLLED by a peer, ONLY Escape
+        // kicks the controller. Pre-v0.3.12 we also kicked on any keypress
+        // / button-press, but that made the receiver unable to type
+        // anything locally without breaking the session — a stray key on
+        // Mac killed the remote from Windows instantly. Classic KVM
+        // behaviour: Esc is the explicit escape hatch, other input flows
+        // through to the receiver's own OS so they can type / click into
+        // local apps while the peer drives the cursor.
+        //
+        // The recently_injected filter still gates Esc: if the controller
+        // pressed Esc to release on their end, that Esc is forwarded and
+        // injected here; rdev's tap sees it too, and we must NOT treat
+        // that echo as a local kick — otherwise the session bounces into
+        // a 5 s cooldown on every graceful release.
         if state.is_controlled() {
-            let is_user_input = match &event.event_type {
-                EventType::KeyPress(rdev::Key::Escape) => {
-                    // Must also filter injected echoes: if the controller's
-                    // user pressed Esc to release on their end, that Esc is
-                    // forwarded to us and injected, and the grab sees it too.
-                    // Without this filter the receiver treats it as a local
-                    // "kick" and the session bounces into cooldown.
-                    if !inject::recently_injected(300) {
-                        tracing::info!("Receiver pressed Escape — signaling disconnect");
-                        true
-                    } else {
-                        false
-                    }
-                }
-                EventType::KeyPress(_) | EventType::ButtonPress(_) => {
-                    // Distinguish native user input from our own echoed injection:
-                    // if we injected in the last 150ms this is probably the echo.
-                    if !inject::recently_injected(300) {
-                        tracing::info!("Receiver native input detected ({:?}) — releasing session", event.event_type);
-                        true
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            };
-            if is_user_input {
-                // Mark the currently-connected peer so it can't auto-reconnect
-                // and re-lock the mouse within 30s. Kicking without cooldown
-                // loses the race against aggressive client auto-reconnect.
+            if matches!(&event.event_type, EventType::KeyPress(rdev::Key::Escape))
+                && !inject::recently_injected(300)
+            {
+                tracing::info!("Receiver pressed Escape — signaling disconnect");
                 if let Some(pid) = state.connected_peer.lock().clone() {
                     state.mark_peer_kicked(&pid);
                 }
@@ -548,6 +534,24 @@ fn handle_grab(event: Event, state: &Arc<AppState>, app: &AppHandle) -> Option<E
                 }));
                 state.signal_disconnect();
                 return None;
+            }
+            // Non-Esc keypresses / button-presses while being controlled:
+            // let them flow through to this machine's OS (`Some(event)`)
+            // so the receiver can type/click locally — do NOT kick the
+            // session. rdev's `grab` can't return the event from inside
+            // the is_controlled block elegantly; the simpler fix is to
+            // fall through to the rest of handle_grab which ends with
+            // `Some(event)` for MouseMove and non-relay state. But for
+            // non-MouseMove events we need to return `Some(event)`
+            // explicitly: return early with Some to bypass the edge-dwell
+            // logic below, which doesn't apply while is_controlled
+            // anyway (`is_echo` short-circuits it).
+            if matches!(
+                &event.event_type,
+                EventType::KeyPress(_) | EventType::KeyRelease(_)
+                | EventType::ButtonPress(_) | EventType::ButtonRelease(_)
+            ) {
+                return Some(event);
             }
         }
 

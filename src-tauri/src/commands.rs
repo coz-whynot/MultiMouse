@@ -1079,6 +1079,55 @@ pub async fn run_diagnostics(
     Ok(out)
 }
 
+/// Return whether `rdev::grab` succeeded at startup. When false, input
+/// capture fell back to listen-only because macOS Accessibility / Input
+/// Monitoring (or the Windows equivalent) isn't granted. The UI polls
+/// this to decide whether to show the permissions banner.
+#[tauri::command]
+pub async fn get_input_grab_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    Ok(state.input_grab_ok.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Open the OS pane where the user grants the missing permission. Uses a
+/// deep-link URL on macOS and the ms-settings URI on Windows. Linux has
+/// no equivalent system UI, so the command returns Ok(()) as a no-op and
+/// the UI falls back to on-screen instructions.
+///
+/// `which` may be "accessibility" or "input_monitoring" on macOS; on
+/// Windows it's always privacy/screen+keyboard — the parameter is
+/// accepted but ignored there.
+#[tauri::command]
+pub async fn open_input_permissions(which: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = match which.as_str() {
+            "input_monitoring" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+            // Default to Accessibility — that's what most users need.
+            _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        };
+        tauri_plugin_opener::open_url(url, None::<&str>)
+            .map_err(|e| format!("Open URL failed: {}", e))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = which;
+        // ms-settings:privacy-general is the closest single pane; Windows
+        // doesn't expose a deep link specifically to the "input access"
+        // permission, but this lands the user in the right section.
+        tauri_plugin_opener::open_url("ms-settings:privacy-general", None::<&str>)
+            .map_err(|e| format!("Open URL failed: {}", e))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = which;
+        Ok(())
+    }
+}
+
 /// Return the last N lines of the current run's log. Used by the
 /// Developer panel's live log tail which polls ~every 500ms while open.
 /// Caps `lines` at 500 so an over-large request doesn't stall the
