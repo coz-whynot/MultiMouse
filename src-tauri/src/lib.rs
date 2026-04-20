@@ -335,6 +335,9 @@ pub fn run() {
             commands::accept_log_request,
             commands::reject_log_request,
             commands::get_peer_app_version,
+            commands::get_debug_state,
+            commands::clear_all_cooldowns,
+            commands::force_dial_peer,
             hide_window,
         ])
         .on_window_event(|window, event| {

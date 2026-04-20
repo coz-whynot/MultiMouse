@@ -157,6 +157,257 @@ const Row = ({ children, noDivider }: { children: React.ReactNode; noDivider?: b
   </div>
 );
 
+/* ── Developer tools section (v0.3.9) ──
+   Live runtime-state viewer + three action buttons for users hitting
+   "edge-cross doesn't fire" or "peer reconnect blocked". Polls
+   `get_debug_state` at 1 Hz while connected so users can WATCH the flags
+   flip as they touch their mouse / trackpad / edge. */
+type DebugState = {
+  connected_peer: string | null;
+  has_net_tx: boolean;
+  can_edge_cross: boolean;
+  is_relaying: boolean;
+  is_controlled: boolean;
+  last_pong_s_ago: number;
+  last_activity_s_ago: number;
+  session_duration_s: number | null;
+  peer_app_version: string | null;
+  peer_cooldowns: Array<{ peer_id: string; remaining_s: number }>;
+  connection_counts: Array<{ ip: string; in_flight: number }>;
+  transition_edge: string;
+  edge_dwell_ms: number;
+  gaming_mode: boolean;
+  bytes_in: number;
+  bytes_out: number;
+};
+
+const DeveloperSection = () => {
+  const { status: appStatus } = useStore();
+  const connectedPeer = appStatus?.connected_peer ?? null;
+  const [dbg, setDbg] = useState<DebugState | null>(null);
+  const [actionMsg, setActionMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  // Poll the debug snapshot while connected. 1 Hz is cheap (a few lock
+  // reads) and makes the flags respond visibly when the user touches
+  // their mouse — handy for learning "oh, my keypress just flipped
+  // is_controlled off via the kick path".
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const v = await invoke<DebugState>('get_debug_state');
+        if (!cancelled) setDbg(v);
+      } catch { /* backend not ready; silent */ }
+    };
+    poll();
+    const id = window.setInterval(poll, 1000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, []);
+
+  const flashAction = (kind: 'ok' | 'err', text: string) => {
+    setActionMsg({ kind, text });
+    window.setTimeout(() => setActionMsg(null), 4000);
+  };
+
+  const Dot = ({ ok }: { ok: boolean }) => (
+    <span
+      className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle flex-shrink-0"
+      style={{ background: ok ? 'var(--success)' : 'var(--danger)' }}
+    />
+  );
+
+  const btnStyle = {
+    background: 'var(--accent-soft-bg)',
+    border: '1px solid var(--accent-soft-br)',
+    color: 'var(--accent-primary)',
+  };
+
+  return (
+    <Section
+      title="Developer"
+      className="lg:col-span-2"
+      icon={
+        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round"
+            d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+        </svg>
+      }
+    >
+      <Row>
+        <p className="text-[11px] mb-3 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+          Live state every 1s. Use this to see WHY edge-cross isn't firing —
+          both <span style={{ color: 'var(--text-secondary)' }}>Connected peer</span> and{' '}
+          <span style={{ color: 'var(--text-secondary)' }}>Can edge-cross</span> must be green.
+        </p>
+
+        {!dbg ? (
+          <p className="text-xs" style={{ color: 'var(--text-faint)' }}>Loading…</p>
+        ) : (
+          <div
+            className="rounded-xl overflow-hidden grid grid-cols-2 gap-x-4 gap-y-2 text-[11px] p-3"
+            style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-subtle)' }}
+          >
+            <div className="flex items-center">
+              <Dot ok={!!dbg.connected_peer} />
+              <span style={{ color: 'var(--text-muted)' }}>Connected peer</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.connected_peer ? dbg.connected_peer.slice(0, 8) : 'none'}
+              </span>
+            </div>
+            <div className="flex items-center">
+              <Dot ok={dbg.can_edge_cross} />
+              <span style={{ color: 'var(--text-muted)' }}>Can edge-cross</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.can_edge_cross ? 'yes' : 'no'}
+              </span>
+            </div>
+            <div className="flex items-center">
+              <Dot ok={dbg.has_net_tx} />
+              <span style={{ color: 'var(--text-muted)' }}>Outbound session (net_tx)</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.has_net_tx ? 'open' : 'none'}
+              </span>
+            </div>
+            <div className="flex items-center">
+              <Dot ok={dbg.is_relaying} />
+              <span style={{ color: 'var(--text-muted)' }}>Relaying out</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.is_relaying ? 'on' : 'off'}
+              </span>
+            </div>
+            <div className="flex items-center">
+              <Dot ok={!dbg.is_controlled} />
+              <span style={{ color: 'var(--text-muted)' }}>Being controlled</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.is_controlled ? 'yes' : 'no'}
+              </span>
+            </div>
+            <div className="flex items-center">
+              <span style={{ color: 'var(--text-muted)' }}>Last Pong</span>
+              <span className="ml-auto font-mono" style={{ color: dbg.last_pong_s_ago > 10 ? 'var(--danger)' : 'var(--text-secondary)' }}>
+                {dbg.last_pong_s_ago}s ago
+              </span>
+            </div>
+            <div className="flex items-center">
+              <span style={{ color: 'var(--text-muted)' }}>Last activity</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.last_activity_s_ago}s ago
+              </span>
+            </div>
+            <div className="flex items-center">
+              <span style={{ color: 'var(--text-muted)' }}>Session uptime</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.session_duration_s !== null ? `${dbg.session_duration_s}s` : '—'}
+              </span>
+            </div>
+            <div className="flex items-center">
+              <span style={{ color: 'var(--text-muted)' }}>Peer version</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.peer_app_version ?? 'unknown'}
+              </span>
+            </div>
+            <div className="flex items-center">
+              <span style={{ color: 'var(--text-muted)' }}>Edge / dwell</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.transition_edge} · {dbg.edge_dwell_ms}ms
+              </span>
+            </div>
+            <div className="flex items-center">
+              <span style={{ color: 'var(--text-muted)' }}>Bytes in / out</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.bytes_in.toLocaleString()} / {dbg.bytes_out.toLocaleString()}
+              </span>
+            </div>
+            <div className="flex items-center">
+              <Dot ok={!dbg.gaming_mode} />
+              <span style={{ color: 'var(--text-muted)' }}>Gaming mode</span>
+              <span className="ml-auto font-mono" style={{ color: 'var(--text-secondary)' }}>
+                {dbg.gaming_mode ? 'on (edge-cross disabled)' : 'off'}
+              </span>
+            </div>
+            {dbg.peer_cooldowns.length > 0 && (
+              <div className="col-span-2 mt-1">
+                <span style={{ color: 'var(--danger)' }}>Cooldowns active:</span>
+                <span className="ml-1.5 font-mono" style={{ color: 'var(--text-secondary)' }}>
+                  {dbg.peer_cooldowns.map((c) => `${c.peer_id.slice(0, 8)} (${c.remaining_s}s)`).join(', ')}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2 mt-3">
+          <button
+            onClick={async () => {
+              try {
+                const n = await invoke<number>('clear_all_cooldowns');
+                flashAction('ok', n > 0 ? `Cleared ${n} cooldown${n === 1 ? '' : 's'}` : 'No cooldowns to clear');
+              } catch (e) { flashAction('err', String(e)); }
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95"
+            style={btnStyle}
+          >
+            Clear cooldowns
+          </button>
+          <button
+            onClick={async () => {
+              if (!connectedPeer) {
+                flashAction('err', 'Not connected to a peer');
+                return;
+              }
+              try {
+                await invoke('force_dial_peer', { peerId: connectedPeer });
+                flashAction('ok', 'Dialing peer as outbound client…');
+              } catch (e) { flashAction('err', String(e)); }
+            }}
+            disabled={!connectedPeer || (dbg?.has_net_tx ?? false)}
+            title={
+              !connectedPeer ? 'Connect to a peer first' :
+              dbg?.has_net_tx ? 'Already have an outbound session' :
+              'Force Mac to also dial the peer so edge-cross works both ways'
+            }
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-40 disabled:active:scale-100"
+            style={btnStyle}
+          >
+            Open outbound session
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                await invoke('disconnect');
+                flashAction('ok', 'Disconnect signaled');
+              } catch (e) { flashAction('err', String(e)); }
+            }}
+            disabled={!connectedPeer}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-40"
+            style={{
+              background: 'var(--bg-subtle)',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--danger)',
+            }}
+          >
+            Force disconnect
+          </button>
+        </div>
+
+        <AnimatePresence>
+          {actionMsg && (
+            <motion.p
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="text-[11px] mt-2.5 leading-relaxed"
+              style={{ color: actionMsg.kind === 'ok' ? 'var(--success)' : 'var(--danger)' }}
+            >
+              {actionMsg.text}
+            </motion.p>
+          )}
+        </AnimatePresence>
+      </Row>
+    </Section>
+  );
+};
+
 /* ── Diagnostics section ──
    Three buttons: reveal the log in Finder/Explorer, copy last 500 lines to
    clipboard for pasting into a support thread, and export a structured JSON
@@ -1355,6 +1606,9 @@ export const SettingsPage = () => {
 
       {/* ── Diagnostics (v0.3.8 Phase E) ── */}
       <DiagnosticsSection />
+
+      {/* ── Developer tools (v0.3.9) ── */}
+      <DeveloperSection />
 
       {/* ── About ── */}
       <Section

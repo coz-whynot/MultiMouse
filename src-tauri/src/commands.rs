@@ -831,3 +831,173 @@ pub async fn get_peer_app_version(
 ) -> Result<Option<String>, String> {
     Ok(state.peer_app_version.lock().clone())
 }
+
+// ── Developer tools (v0.3.9) ─────────────────────────────────────────────
+
+/// Live snapshot of every runtime flag that gates edge-cross and session
+/// liveness. Designed to be polled at ~1 Hz by a dev panel in Settings so
+/// users can see WHY a session isn't behaving without attaching a debugger
+/// or reading log files. All fields are Serialize-friendly primitives.
+#[tauri::command]
+pub async fn get_debug_state(
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    use std::sync::atomic::Ordering;
+    let now = std::time::Instant::now();
+
+    let connected_peer = state.connected_peer.lock().clone();
+    let has_net_tx = state.net_tx.lock().is_some();
+    let is_relaying = state.is_relaying();
+    let is_controlled = state.is_controlled();
+    let last_pong_s_ago = state.last_pong.lock().elapsed().as_secs();
+    let last_activity_s_ago = state.last_activity.lock().elapsed().as_secs();
+    let session_duration_s = state
+        .session_start
+        .lock()
+        .map(|t| t.elapsed().as_secs());
+    let peer_app_version = state.peer_app_version.lock().clone();
+
+    // peer_cooldowns: remaining seconds per peer. Key info for "why can't
+    // the peer reconnect" debugging.
+    let cooldowns: Vec<serde_json::Value> = state
+        .peer_cooldowns
+        .lock()
+        .iter()
+        .filter_map(|(peer_id, until)| {
+            let remaining = until.saturating_duration_since(now).as_secs();
+            if remaining == 0 { return None; }
+            Some(serde_json::json!({
+                "peer_id": peer_id,
+                "remaining_s": remaining,
+            }))
+        })
+        .collect();
+
+    // connection_count: the per-IP rate limit counter. Shows why a peer
+    // might be hitting "Rate limit: too many connections".
+    let conn_counts: Vec<serde_json::Value> = state
+        .connection_count
+        .lock()
+        .iter()
+        .map(|(ip, n)| serde_json::json!({ "ip": ip, "in_flight": n }))
+        .collect();
+
+    // The settings-driven transition_edge — useful to confirm the user's
+    // configured edge matches the one they're trying to cross.
+    let transition_edge = state.settings.read().transition_edge.clone();
+    let edge_dwell_ms = state.settings.read().edge_dwell_ms;
+    let gaming_mode = state.settings.read().gaming_mode;
+
+    let bytes_in = state.bytes_received.load(Ordering::Relaxed);
+    let bytes_out = state.bytes_sent.load(Ordering::Relaxed);
+
+    Ok(serde_json::json!({
+        "connected_peer": connected_peer,
+        "has_net_tx": has_net_tx,
+        "can_edge_cross": has_net_tx && !is_controlled,
+        "is_relaying": is_relaying,
+        "is_controlled": is_controlled,
+        "last_pong_s_ago": last_pong_s_ago,
+        "last_activity_s_ago": last_activity_s_ago,
+        "session_duration_s": session_duration_s,
+        "peer_app_version": peer_app_version,
+        "peer_cooldowns": cooldowns,
+        "connection_counts": conn_counts,
+        "transition_edge": transition_edge,
+        "edge_dwell_ms": edge_dwell_ms,
+        "gaming_mode": gaming_mode,
+        "bytes_in": bytes_in,
+        "bytes_out": bytes_out,
+    }))
+}
+
+/// Clear every entry in `peer_cooldowns`. After a kick, the kicked peer is
+/// blocked from reconnecting for 5 seconds — sometimes the user wants to
+/// resume immediately (they didn't mean to kick) without waiting. This
+/// command gives them a direct escape hatch.
+#[tauri::command]
+pub async fn clear_all_cooldowns(
+    state: State<'_, Arc<AppState>>,
+) -> Result<usize, String> {
+    let mut guard = state.peer_cooldowns.lock();
+    let count = guard.len();
+    guard.clear();
+    tracing::info!(cleared = count, "dev: cooldowns manually cleared");
+    Ok(count)
+}
+
+/// Force an outbound client session to a peer, even if that peer is
+/// already the active "server" for us. This is the v0.3.9 workaround for
+/// the "Mac is only passive-server, can't edge-cross out" case: by dialing
+/// the peer too, Mac's `state.net_tx` gets populated and edge-dwell
+/// activation can fire. Effectively a symmetric pairing — both sides end
+/// up with client+server sessions to each other.
+///
+/// Uses the existing `connect_to_device` pathway, so auth / session-key
+/// reuse / known-peers check all run exactly as a normal user-click
+/// would.
+#[tauri::command]
+pub async fn force_dial_peer(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    peer_id: String,
+) -> Result<(), String> {
+    // If we already have an outbound net_tx, there's nothing to do — an
+    // outbound session is already running. Better to say so than silently
+    // spawn a duplicate that competes for `state.net_tx`.
+    if state.net_tx.lock().is_some() {
+        return Err("Outbound session already active to a peer".into());
+    }
+    // Look up the peer in `state.peers` (mDNS-discovered) or in stored
+    // known-devices, whichever has the address.
+    let discovered = state.peers.lock()
+        .iter()
+        .find(|p| p.id == peer_id)
+        .cloned();
+    let (addr, port, name) = if let Some(p) = discovered {
+        (p.addr, p.port, p.name)
+    } else if let Some(d) = storage::get_known_device(&peer_id) {
+        (d.addr, d.port, d.name)
+    } else {
+        return Err(format!("Peer {} not found in discovery or known devices", peer_id));
+    };
+    if addr.is_empty() {
+        return Err("Peer has no known address (mDNS not resolved yet)".into());
+    }
+
+    // For a forced dial, use the existing known-device session_key so the
+    // handshake skips PIN entry. If no stored key, fail clearly — a
+    // first-time pairing must go through the normal UI flow (the PIN
+    // display + user accept) rather than an unauthenticated dev-tool
+    // dial.
+    let session_key = storage::get_session_key(&peer_id);
+    if session_key.is_none() {
+        return Err("No stored session key for this peer — pair first via normal connect flow".into());
+    }
+    let app_clone = app.clone();
+    let state_clone = state.inner().clone();
+    let peer_info = crate::state::PeerInfo {
+        id: peer_id,
+        name,
+        addr,
+        port,
+        status: crate::state::PeerStatus::Available,
+        ping_ms: None,
+        is_known: true,
+        last_seen: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        app_version: None,
+    };
+    tauri::async_runtime::spawn(async move {
+        crate::network::client::connect(
+            app_clone,
+            state_clone,
+            peer_info,
+            String::new(), // pin unused when session_key is supplied
+            session_key,
+        ).await;
+    });
+    Ok(())
+}
