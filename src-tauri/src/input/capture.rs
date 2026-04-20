@@ -347,6 +347,18 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
                 // that already mounted its listener, which is racy at app
                 // startup.
                 state.input_grab_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+                // v0.3.15: ad-hoc-signed macOS builds get a fresh code
+                // signature on every auto-update, which leaves orphaned
+                // TCC entries that silently match the OLD binary instead
+                // of the current one. Auto-running `tccutil reset` here
+                // clears the stale entries so the user only has to re-add
+                // MultiMouse to Accessibility + Input Monitoring once —
+                // no more manual-terminal-command step after each update.
+                // Safe to run repeatedly: it's idempotent when there's
+                // nothing to clear, and it only touches THIS app's bundle
+                // id (no admin needed).
+                #[cfg(target_os = "macos")]
+                macos_clear_stale_tcc_entries();
                 let platform = if cfg!(target_os = "macos") { "macos" }
                                else if cfg!(target_os = "windows") { "windows" }
                                else { "linux" };
@@ -992,5 +1004,48 @@ fn button_to_u8(button: &rdev::Button) -> u8 {
         rdev::Button::Right => 1,
         rdev::Button::Middle => 2,
         rdev::Button::Unknown(n) => *n as u8,
+    }
+}
+
+/// v0.3.15: shell out to `tccutil` to clear stale TCC entries for this
+/// app's bundle id. Called at startup whenever `rdev::grab` fails, so
+/// ad-hoc-signed auto-updates don't leave a pile of orphaned
+/// "MultiMouse" rows in System Settings that silently match an older
+/// binary. Running once per failed boot is fine — it's a no-op when
+/// the list is already empty.
+///
+/// Only touches our own bundle id, so it doesn't require admin
+/// privileges (verified via manual test). The bundle id is hardcoded
+/// to match `tauri.conf.json`'s `identifier` — if that changes, this
+/// string has to change too. A mismatch silently fails to clear
+/// anything; the banner still fires and the user can do the manual
+/// reset like before v0.3.15.
+#[cfg(target_os = "macos")]
+fn macos_clear_stale_tcc_entries() {
+    use std::process::Command;
+    const BUNDLE_ID: &str = "com.multimouse.app";
+    for perm in &["Accessibility", "ListenEvent"] {
+        let out = Command::new("tccutil")
+            .args(["reset", perm, BUNDLE_ID])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                tracing::info!(
+                    "Cleared stale TCC entries for {} (bundle={})",
+                    perm, BUNDLE_ID
+                );
+            }
+            Ok(o) => {
+                tracing::warn!(
+                    "tccutil reset {} failed: code={:?}, stderr={}",
+                    perm,
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Err(e) => {
+                tracing::warn!("tccutil spawn failed: {} (PATH issue?)", e);
+            }
+        }
     }
 }
