@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "multimouse"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -2776,6 +2776,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "socket2 0.5.10",
  "subtle",
  "tauri",
  "tauri-build",

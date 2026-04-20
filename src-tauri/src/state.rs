@@ -269,6 +269,37 @@ pub struct AppState {
     pub session_start: Mutex<Option<std::time::Instant>>,
     /// Last time we observed remote-input activity (used by idle auto-lock)
     pub last_activity: Mutex<std::time::Instant>,
+    /// Client-side liveness: timestamp of the most recent `Pong` reply from
+    /// the peer. The client sends Ping every 5s (see client.rs ping_task);
+    /// a watchdog task tears down the session if this Instant ages past 15s
+    /// — catching the case where TCP looks alive but the peer has frozen /
+    /// its writer task died. MUST be reset to `Instant::now()` at
+    /// `start_session()` time so a stale value from a previous session
+    /// doesn't fire the watchdog immediately on reconnect.
+    pub last_pong: Mutex<std::time::Instant>,
+    /// v0.3.8+ cross-device log pull. Oneshot channel set by the UI layer
+    /// when the local user asks to pull peer logs; resolved by the read
+    /// loop when the peer's `LogShare` reply arrives (or on timeout). Only
+    /// one pull can be in flight per session — a second `request_peer_logs`
+    /// call returns a "busy" error instead of racing over this slot.
+    pub pending_log_pull: Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
+    /// v0.3.8+ cross-device log pull (inbound side). Set when a peer sends
+    /// us a `LogRequest`; the user's accept/reject modal resolves it via
+    /// the `accept_log_request` / `reject_log_request` commands. Single
+    /// slot — a second inbound request while one is pending is rejected
+    /// with an empty reply so both sides' UIs don't deadlock.
+    pub pending_log_request: Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+    /// v0.3.8+ rate limit on how often this peer can demand our logs. A
+    /// `LogRequest` more frequent than 1/minute returns an empty reply
+    /// without bothering the user — blocks a buggy or malicious peer
+    /// from spamming the accept/reject modal.
+    pub last_log_request: Mutex<Option<std::time::Instant>>,
+    /// v0.3.8+ peer's advertised app_version from the `PeerVersion`
+    /// handshake message. Used by the UI to decide whether log-pull is
+    /// available (peer must be ≥ 0.3.8). None while no PeerVersion has
+    /// been received yet (either session not started, or peer is on a
+    /// pre-0.2.9 build that never shipped PeerVersion).
+    pub peer_app_version: Mutex<Option<String>>,
     /// Notify signal raised when the server should break out of its read loop
     /// immediately — used to let the receiver kick the controller out via Esc.
     pub server_disconnect: std::sync::Arc<tokio::sync::Notify>,
@@ -357,6 +388,11 @@ impl AppState {
             bytes_received: std::sync::atomic::AtomicU64::new(0),
             session_start: Mutex::new(None),
             last_activity: Mutex::new(Instant::now()),
+            last_pong: Mutex::new(Instant::now()),
+            pending_log_pull: Mutex::new(None),
+            pending_log_request: Mutex::new(None),
+            last_log_request: Mutex::new(None),
+            peer_app_version: Mutex::new(None),
             server_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
             peer_cooldowns: Mutex::new(HashMap::new()),
             edge_first_touch: Mutex::new(None),
@@ -435,6 +471,13 @@ impl AppState {
 
     pub fn start_session(&self) {
         *self.session_start.lock() = Some(Instant::now());
+        // Reset the Pong watchdog clock so the 15s countdown begins from
+        // NOW, not from whatever stale instant sat here during the last
+        // session. Without this reset, a previous session's `last_pong`
+        // could already be older than 15s by the time the new session
+        // starts, and the watchdog would tear down the fresh session
+        // before its first Pong round-trip completes.
+        *self.last_pong.lock() = Instant::now();
     }
 
     pub fn mark_activity(&self) {

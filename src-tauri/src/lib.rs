@@ -50,8 +50,18 @@ pub fn log_file_path() -> Option<PathBuf> {
 ///   readonly volume), we silently fall back to stderr-only — the app still
 ///   runs, the tray menu item just won't have a path to open.
 fn init_logging() {
+    // EnvFilter matches on `::` boundaries — not raw prefixes — so
+    // `multimouse=debug` does NOT match the `multimouse_lib::…` targets
+    // that all application code actually emits under (the Cargo.toml
+    // binary is `multimouse` but the library crate where every module
+    // lives is `multimouse_lib`). Without the `multimouse_lib=debug`
+    // directive, every `tracing::debug!` from the app is silently
+    // filtered out — this was the reason v0.3.7 logs had zero DEBUG
+    // events even with the filter nominally at `debug`. Final `warn`
+    // is the global default for everything else (tungstenite, mdns_sd,
+    // …). Env var still overrides for ad-hoc debugging.
     let filter_str = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| "multimouse=debug,warn".to_string());
+        .unwrap_or_else(|_| "multimouse_lib=debug,multimouse=debug,warn".to_string());
     let env_filter = EnvFilter::try_new(&filter_str)
         .unwrap_or_else(|_| EnvFilter::new("warn"));
 
@@ -318,6 +328,13 @@ pub fn run() {
             commands::get_bandwidth,
             commands::get_audit_log,
             commands::clear_audit_log,
+            commands::open_log_file,
+            commands::copy_log_to_clipboard,
+            commands::export_diagnostics_bundle,
+            commands::request_peer_logs,
+            commands::accept_log_request,
+            commands::reject_log_request,
+            commands::get_peer_app_version,
             hide_window,
         ])
         .on_window_event(|window, event| {

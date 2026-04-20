@@ -62,6 +62,11 @@ export default function App() {
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [reconnectState, setReconnectState] = useState<ReconnectState | null>(null);
   const [idleLockMsg, setIdleLockMsg] = useState<string | null>(null);
+  // v0.3.8 Phase F — inbound log-pull request from the peer. When set, a
+  // modal asks the local user "<requester> is requesting your diagnostic
+  // logs; share?". Accept/reject both invoke the corresponding Rust command
+  // to resolve the server-side oneshot, then this clears.
+  const [logRequestFromPeer, setLogRequestFromPeer] = useState<{ requester_name: string } | null>(null);
   // Peer reported a newer app version → show a one-click update nudge.
   const [peerNewerVersion, setPeerNewerVersion] = useState<string | null>(null);
   const [updateNudgeBusy, setUpdateNudgeBusy] = useState(false);
@@ -269,6 +274,9 @@ export default function App() {
             : 'Session locked due to inactivity.',
         );
         window.setTimeout(() => setIdleLockMsg(null), 6000);
+      }),
+      listen<{ requester_name: string }>('log-request-received', (e) => {
+        setLogRequestFromPeer(e.payload);
       }),
       listen('tauri://drag', () => setDraggingFiles(true)),
       listen('tauri://drag-leave', () => setDraggingFiles(false)),
@@ -530,9 +538,13 @@ export default function App() {
 
       <TransferPanel />
 
-      {/* File drag overlay */}
+      {/* File drag overlay. Shown ONLY when a peer is connected — without
+          a peer there's no send target and a "No device connected" overlay
+          is user-hostile when the user's just dragging a file between two
+          windows that happens to pass over this one. Text names the peer
+          so the user sees which device will receive the file. */}
       <AnimatePresence>
-        {draggingFiles && (
+        {draggingFiles && connectedPeer && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -557,13 +569,11 @@ export default function App() {
               </motion.div>
               <div className="text-center">
                 <p className="text-sm font-bold" style={{ color: 'var(--text-strong)' }}>
-                  {connectedPeer ? 'Drop to send' : 'No device connected'}
+                  Drop to send to {peerNameForBlur}
                 </p>
-                {connectedPeer && (
-                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                    File will land in their Downloads folder
-                  </p>
-                )}
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                  File will land in their Downloads folder
+                </p>
               </div>
             </div>
           </motion.div>
@@ -679,6 +689,23 @@ export default function App() {
               // Also clear the client-side SAS or Home.tsx's connecting overlay
               // will keep showing an old PIN into the next pairing attempt.
               setShownPin(null);
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Inbound log-pull request modal (v0.3.8 Phase F) */}
+      <AnimatePresence>
+        {logRequestFromPeer && (
+          <LogRequestModal
+            requesterName={logRequestFromPeer.requester_name}
+            onAccept={async () => {
+              try { await invoke('accept_log_request'); } catch {}
+              setLogRequestFromPeer(null);
+            }}
+            onReject={async () => {
+              try { await invoke('reject_log_request'); } catch {}
+              setLogRequestFromPeer(null);
             }}
           />
         )}
@@ -830,5 +857,87 @@ export default function App() {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+/* v0.3.8 Phase F — modal shown when a peer requests our diagnostic logs.
+   Must be explicit accept: a silent auto-share would let a malicious or
+   compromised peer exfiltrate logs with no user signal. Rejecting the
+   modal (or ignoring it for 60s) sends back an empty `LogShare`, so the
+   requester's UI unblocks with a "peer declined" message. */
+function LogRequestModal({
+  requesterName,
+  onAccept,
+  onReject,
+}: {
+  requesterName: string;
+  onAccept: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-6"
+      style={{ background: 'rgba(0,0,0,0.55)' }}
+    >
+      <motion.div
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.95, opacity: 0 }}
+        className="w-full max-w-sm rounded-2xl p-5"
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border-strong)',
+          boxShadow: '0 16px 48px rgba(0,0,0,0.45)',
+        }}
+      >
+        <p
+          className="text-[10px] font-bold uppercase tracking-widest mb-2"
+          style={{ color: 'var(--accent-muted)' }}
+        >
+          Log request
+        </p>
+        <p
+          className="text-base font-semibold mb-1.5 break-words"
+          style={{ color: 'var(--text-primary)' }}
+        >
+          {requesterName || 'Peer'} is asking for your diagnostic logs.
+        </p>
+        <p
+          className="text-xs leading-relaxed mb-4"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          Accept to share the last ~500 lines of your log. This contains
+          connection events and warnings, not your keyboard activity or
+          clipboard content. Reject if you're unsure.
+        </p>
+        <div className="flex gap-2">
+          <button
+            onClick={onReject}
+            className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-all active:scale-[0.97]"
+            style={{
+              background: 'var(--bg-subtle)',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-body)',
+            }}
+          >
+            Reject
+          </button>
+          <button
+            onClick={onAccept}
+            className="flex-1 py-2.5 rounded-xl text-sm font-bold transition-all active:scale-[0.97]"
+            style={{
+              background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+              boxShadow: '0 4px 16px rgba(99,102,241,0.35)',
+              color: 'white',
+            }}
+          >
+            Share logs
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
   );
 }

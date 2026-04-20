@@ -570,3 +570,264 @@ pub async fn get_trackpad_status(
         "clients": clients,
     }))
 }
+
+// ── Diagnostics (v0.3.8 Phase E) ─────────────────────────────────────────
+
+/// Return the last `n` lines of `s` joined with '\n'. Used by the log-copy
+/// and bundle-export commands so a multi-megabyte log doesn't all land in
+/// the clipboard / bundle.
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// Reveal the current run's log file in Finder / Explorer. Errors out with
+/// a user-readable message when file logging failed to initialise (rare —
+/// the app data dir wasn't writable at startup and logging fell back to
+/// stderr only).
+#[tauri::command]
+pub async fn open_log_file() -> Result<(), String> {
+    let path = crate::log_file_path()
+        .ok_or_else(|| "Log file path not available (stderr-only mode this run)".to_string())?;
+    tauri_plugin_opener::reveal_item_in_dir(&path)
+        .map_err(|e| format!("Reveal failed: {}", e))
+}
+
+/// Copy the last 500 lines of the current log to the system clipboard.
+/// Returns the byte count for UI confirmation. 500 lines is typically well
+/// under any clipboard's text limit, and covers a few minutes of activity
+/// in a busy session.
+#[tauri::command]
+pub async fn copy_log_to_clipboard() -> Result<usize, String> {
+    let path = crate::log_file_path()
+        .ok_or_else(|| "Log file not available".to_string())?;
+    let content = tokio::task::spawn_blocking(move || {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        Ok::<_, String>(tail_lines(&raw, 500))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let byte_len = content.len();
+    // Use a short-lived std::thread (arboard is sync-only) — NOT the
+    // persistent clipboard writer, which is reserved for peer-sourced
+    // clipboard content sync. Local log copy is orthogonal.
+    std::thread::spawn(move || {
+        if let Ok(mut ctx) = arboard::Clipboard::new() {
+            let _ = ctx.set_text(&content);
+        }
+    });
+    Ok(byte_len)
+}
+
+/// Write a JSON diagnostics bundle to `~/Desktop/multimouse-diagnostics-<ts>.json`
+/// and reveal it in Finder / Explorer. Returns the absolute path written.
+///
+/// Redaction policy — audited at implementation time to keep secrets out:
+/// - INCLUDED: app version, protocol version, OS platform/arch, device
+///   name (user-chosen), settings snapshot, last 2000 lines of current
+///   log, last 2000 lines of previous (rotated) log, optional peer log
+///   text from a Phase F `request_peer_logs` call.
+/// - EXCLUDED: `session_key`, full `known_devices` list (those entries
+///   carry session keys), `device_id` (cross-bundle correlation token),
+///   `trackpad_token` (secret used to authorise the trackpad WS endpoint).
+/// - `relay_url` REDACTED to "<configured>" if non-empty, since it may
+///   carry credentials in the URL that we can't reliably parse out.
+#[tauri::command]
+pub async fn export_diagnostics_bundle(
+    state: State<'_, Arc<AppState>>,
+    peer_log: Option<String>,
+) -> Result<String, String> {
+    use serde_json::json;
+
+    let log_path = crate::log_file_path();
+    let prev_log_path = log_path
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.join("multimouse.log.prev")));
+
+    let log_tail = if let Some(p) = log_path.as_ref() {
+        let p = p.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&p).map(|s| tail_lines(&s, 2000)).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
+    } else { String::new() };
+
+    let prev_tail = if let Some(p) = prev_log_path {
+        tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&p).map(|s| tail_lines(&s, 2000)).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
+    } else { String::new() };
+
+    // Settings snapshot with secrets stripped. Settings itself doesn't
+    // store session_key/pin/trackpad_token (those live elsewhere on state
+    // or in storage), but relay_url MAY carry creds — redact if non-empty
+    // rather than try to parse. User can decide to share the URL out-of-band.
+    let settings_snapshot = {
+        let s = state.settings.read().clone();
+        let mut v = serde_json::to_value(&s).unwrap_or(json!({}));
+        if let Some(url) = v.get("relay_url").and_then(|x| x.as_str()) {
+            if !url.is_empty() {
+                v["relay_url"] = json!("<configured>");
+            }
+        }
+        v
+    };
+
+    let device_name = state.device_name.clone();
+
+    let bundle = json!({
+        "schema": "multimouse-diag-v1",
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": crate::network::protocol::PROTOCOL_VERSION,
+        "os": {
+            "platform": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "family": std::env::consts::FAMILY,
+        },
+        "device_name": device_name,
+        "settings": settings_snapshot,
+        "log_current_tail_2000": log_tail,
+        "log_previous_tail_2000": prev_tail,
+        "log_peer_tail": peer_log.unwrap_or_default(),
+        "generated_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0),
+    });
+
+    let out_dir = dirs::desktop_dir()
+        .or_else(dirs::download_dir)
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "Could not resolve Desktop/Downloads/home directory".to_string())?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let out_path = out_dir.join(format!("multimouse-diagnostics-{}.json", ts));
+
+    let json_pretty = serde_json::to_string_pretty(&bundle)
+        .map_err(|e| format!("serialize: {}", e))?;
+    let write_path = out_path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&write_path, json_pretty))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("write: {}", e))?;
+
+    let _ = tauri_plugin_opener::reveal_item_in_dir(&out_path);
+    Ok(out_path.to_string_lossy().into_owned())
+}
+
+/// Lowest app_version that speaks `Message::LogRequest` / `Message::LogShare`.
+/// Older peers will fail to deserialize these variants and drop the session,
+/// so the UI MUST check peer's advertised app_version before letting the
+/// user click "Pull peer logs".
+///
+/// semver-style comparison: the string form "0.3.8" compares correctly
+/// lexicographically while versions stay single-digit, but we parse into
+/// tuples for safety against a future 0.3.10.
+fn peer_supports_log_pull(app_version: &str) -> bool {
+    fn parse(v: &str) -> Option<(u32, u32, u32)> {
+        let parts: Vec<_> = v.split('.').collect();
+        if parts.len() < 3 { return None; }
+        Some((parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?))
+    }
+    match parse(app_version) {
+        Some(v) => v >= (0, 3, 8),
+        None => false,
+    }
+}
+
+/// Send a `LogRequest` to the connected peer and wait for their reply
+/// (accept = log tail, reject = empty string). Returns the peer's log
+/// content, or an error string explaining why the pull couldn't happen.
+///
+/// Pre-conditions:
+/// - A session must be active (`state.net_tx` must be Some).
+/// - Peer's app_version (learned from handshake `PeerVersion` msg) must
+///   be ≥ 0.3.8. Pre-0.3.8 peers don't speak `LogRequest` and would drop
+///   the session on receipt of the unknown variant, so we refuse early.
+/// - Only one log pull can be in flight per session — second concurrent
+///   call returns a "busy" error rather than racing over
+///   `state.pending_log_pull`.
+///
+/// Timeout: 65s (the peer-side modal has a 60s timeout; we add 5s of
+/// headroom for wire latency). On timeout the peer may still reply
+/// later; we clear the pending slot so the reply is discarded cleanly.
+#[tauri::command]
+pub async fn request_peer_logs(
+    state: State<'_, Arc<AppState>>,
+    local_device_name: String,
+) -> Result<String, String> {
+    // Gate: peer must be on v0.3.8+ so they'll recognise LogRequest.
+    let peer_ver = state.peer_app_version.lock().clone();
+    match peer_ver.as_deref() {
+        Some(v) if peer_supports_log_pull(v) => {}
+        Some(v) => return Err(format!(
+            "Peer is on v{}; log pull requires v0.3.8+. Ask the other user to update first.", v
+        )),
+        None => return Err("Peer hasn't reported its version yet — wait a moment and try again.".into()),
+    }
+
+    // Must have an active session with an outbound channel (we're the client).
+    if state.net_tx.lock().is_none() {
+        return Err("No active outbound session. Log pull must be initiated from the side that opened the connection.".into());
+    }
+
+    // Single-slot pending channel.
+    if state.pending_log_pull.lock().is_some() {
+        return Err("A log pull is already in progress.".into());
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    *state.pending_log_pull.lock() = Some(tx);
+    state.send_net(NetCommand::LogRequest { requester_name: local_device_name });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(65), rx).await {
+        Ok(Ok(content)) => Ok(content),
+        Ok(Err(_)) => {
+            *state.pending_log_pull.lock() = None;
+            Err("Reply channel closed unexpectedly.".into())
+        }
+        Err(_) => {
+            *state.pending_log_pull.lock() = None;
+            Err("Peer did not reply within 65s (they may have ignored the modal).".into())
+        }
+    }
+}
+
+/// Accept a peer's pending `LogRequest`. Resolves the oneshot that
+/// `resolve_log_request` is awaiting, which then ships the log tail.
+#[tauri::command]
+pub async fn accept_log_request(
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if let Some(tx) = state.pending_log_request.lock().take() {
+        let _ = tx.send(true);
+    }
+    Ok(())
+}
+
+/// Reject a peer's pending `LogRequest`. Resolves the oneshot with false;
+/// the peer gets an empty `LogShare` reply so their request doesn't hang.
+#[tauri::command]
+pub async fn reject_log_request(
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if let Some(tx) = state.pending_log_request.lock().take() {
+        let _ = tx.send(false);
+    }
+    Ok(())
+}
+
+/// Return the connected peer's advertised app_version, or None if no
+/// session is active / no PeerVersion has arrived yet. Used by the
+/// Settings UI to enable / disable the "Pull peer logs" button.
+#[tauri::command]
+pub async fn get_peer_app_version(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    Ok(state.peer_app_version.lock().clone())
+}

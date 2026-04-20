@@ -40,12 +40,30 @@ impl Channel {
     pub fn seal(&mut self, plaintext: &[u8]) -> Option<Vec<u8>> {
         // Refuse to encrypt if the next counter would overflow — never reuse a nonce.
         if self.nonce_ctr == u64::MAX {
+            tracing::error!(
+                "encryption seal: nonce counter exhausted (u64::MAX reached); \
+                 session cannot send any more messages"
+            );
             return None;
         }
         let mut nonce_bytes = [0u8; NONCE_LEN];
         nonce_bytes[..8].copy_from_slice(&self.nonce_ctr.to_le_bytes());
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let ct = self.cipher.encrypt(nonce, plaintext).ok()?;
+        let ct = match self.cipher.encrypt(nonce, plaintext) {
+            Ok(c) => c,
+            Err(e) => {
+                // ChaCha20Poly1305 encrypt returning Err is extremely rare
+                // (effectively "cosmic ray" territory — the AEAD doesn't
+                // have plaintext-size limits we'd hit). Log it explicitly
+                // so if it ever does happen we don't debug blind.
+                tracing::error!(
+                    err = ?e,
+                    plaintext_len = plaintext.len(),
+                    "encryption seal: AEAD encrypt failed (should be unreachable)"
+                );
+                return None;
+            }
+        };
         // Only bump the counter once encryption has actually succeeded.
         self.nonce_ctr += 1;
         let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
@@ -59,17 +77,46 @@ impl Channel {
     /// last accepted one — this prevents an attacker from replaying captured
     /// ciphertext back at us (e.g. a recorded MouseClick).
     pub fn open(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        if data.len() < NONCE_LEN { return None; }
+        if data.len() < NONCE_LEN {
+            tracing::warn!(
+                frame_len = data.len(),
+                "encryption open: frame shorter than nonce (12B); peer sent garbage or TCP corruption"
+            );
+            return None;
+        }
         let nonce = Nonce::from_slice(&data[..NONCE_LEN]);
 
         let mut ctr_bytes = [0u8; 8];
         ctr_bytes.copy_from_slice(&data[..8]);
         let ctr = u64::from_le_bytes(ctr_bytes);
         if let Some(last) = self.last_recv_ctr {
-            if ctr <= last { return None; }
+            if ctr <= last {
+                tracing::warn!(
+                    ctr = ctr,
+                    last_ctr = last,
+                    "encryption open: replay rejected (counter <= last accepted); \
+                     possible attacker or duplicated TCP bytes"
+                );
+                return None;
+            }
         }
 
-        let plain = self.cipher.decrypt(nonce, &data[NONCE_LEN..]).ok()?;
+        let plain = match self.cipher.decrypt(nonce, &data[NONCE_LEN..]) {
+            Ok(p) => p,
+            Err(_) => {
+                // AEAD tag mismatch — ciphertext was modified in flight or
+                // the wrong key is in use. We intentionally don't log the
+                // error detail (opaque by design) or the nonce, to avoid
+                // leaking structural info about traffic, but we DO log that
+                // it happened so the session-drop is attributable.
+                tracing::warn!(
+                    ctr = ctr,
+                    ct_len = data.len() - NONCE_LEN,
+                    "encryption open: AEAD decrypt failed (tag mismatch or wrong key)"
+                );
+                return None;
+            }
+        };
         self.last_recv_ctr = Some(ctr);
         Some(plain)
     }

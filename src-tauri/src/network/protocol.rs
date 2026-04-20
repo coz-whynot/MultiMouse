@@ -89,8 +89,32 @@ pub enum Message {
     PeerVersion {
         app_version: String,
     },
+    /// v0.3.8+ — "please send me your log file" request. Additive over v6
+    /// wire protocol — BOTH peers must be on v0.3.8+ for this to work.
+    /// Older peers receiving this variant fail deserialization and drop
+    /// the session, so the sender MUST gate on peer's app_version ≥ 0.3.8
+    /// before emitting (see commands::request_peer_logs).
+    ///
+    /// The receiver raises a user-confirmation modal ("<name> is requesting
+    /// your diagnostic logs. Share?") — LogRequest NEVER exfiltrates logs
+    /// without explicit per-request user consent.
+    LogRequest {
+        requester_name: String,
+    },
+    /// v0.3.8+ — reply to `LogRequest`. Empty `content` means rejected or
+    /// unavailable (so the requester's UI unblocks cleanly instead of
+    /// hanging). Size-capped at `LOG_SHARE_MAX` — see that constant.
+    LogShare {
+        content: String,
+    },
     Bye,
 }
+
+/// Hard cap on `LogShare::content` size. 256 KiB fits comfortably inside
+/// the 2 MiB encrypted frame cap (see `read_enc_message`) with headroom
+/// for AEAD overhead + JSON escaping. Enforced on the SEND side in
+/// network/mod.rs::read_log_tail_capped.
+pub const LOG_SHARE_MAX: usize = 256 * 1024;
 
 /// Separate protocol for file transfers (used on TRANSFER_PORT)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -169,6 +193,11 @@ pub enum NetCommand {
     ClipboardImage { width: u32, height: u32, bytes: Vec<u8> },
     Ping(u64),
     Disconnect,
+    /// v0.3.8+ — request peer's log tail. See `Message::LogRequest`.
+    LogRequest { requester_name: String },
+    /// v0.3.8+ — reply to a peer's log request with our log tail (or
+    /// empty for rejected). See `Message::LogShare`.
+    LogShare { content: String },
 }
 
 pub async fn read_enc_message<R: AsyncRead + Unpin>(

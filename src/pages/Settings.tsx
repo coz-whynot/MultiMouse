@@ -157,6 +157,167 @@ const Row = ({ children, noDivider }: { children: React.ReactNode; noDivider?: b
   </div>
 );
 
+/* ── Diagnostics section ──
+   Three buttons: reveal the log in Finder/Explorer, copy last 500 lines to
+   clipboard for pasting into a support thread, and export a structured JSON
+   bundle (OS + settings + log tails) to the Desktop. All three invoke
+   Rust-side commands that redact secrets. Uses a local transient status
+   line instead of a toast system — the project doesn't have one and
+   inventing one just for this section is out of scope. */
+const DiagnosticsSection = () => {
+  const { status: appStatus } = useStore();
+  const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [pullBusy, setPullBusy] = useState(false);
+  const [peerAppVersion, setPeerAppVersion] = useState<string | null>(null);
+  const flash = (kind: 'ok' | 'err', text: string) => {
+    setStatus({ kind, text });
+    window.setTimeout(() => setStatus(null), 4000);
+  };
+
+  const connectedPeer = appStatus?.connected_peer ?? null;
+
+  // Refresh peer app version whenever a session begins / ends — the command
+  // is cheap (a single lock read) so we can just poll while connected.
+  useEffect(() => {
+    if (!connectedPeer) {
+      setPeerAppVersion(null);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const v = await invoke<string | null>('get_peer_app_version');
+        if (!cancelled) setPeerAppVersion(v ?? null);
+      } catch { /* not connected yet; try again on next tick */ }
+    };
+    poll();
+    const id = window.setInterval(poll, 2000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [connectedPeer]);
+
+  // Peer must be on 0.3.8+ for LogRequest/LogShare variants to deserialize.
+  // Earlier peers drop the session on unknown variant, so the button stays
+  // disabled until we've confirmed the peer is new enough.
+  const peerSupportsLogPull = (() => {
+    if (!peerAppVersion) return false;
+    const parts = peerAppVersion.split('.').map((p) => parseInt(p, 10));
+    if (parts.length < 3 || parts.some(isNaN)) return false;
+    const [maj, min, pat] = parts;
+    return maj > 0 || (maj === 0 && (min > 3 || (min === 3 && pat >= 8)));
+  })();
+
+  const btnStyle = {
+    background: 'var(--accent-soft-bg)',
+    border: '1px solid var(--accent-soft-br)',
+    color: 'var(--accent-primary)',
+  };
+
+  const disabledStyle = {
+    background: 'var(--bg-subtle)',
+    border: '1px solid var(--border-subtle)',
+    color: 'var(--text-ghost)',
+    cursor: 'not-allowed',
+  };
+
+  return (
+    <Section
+      title="Diagnostics"
+      className="lg:col-span-2"
+      icon={
+        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round"
+            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+        </svg>
+      }
+    >
+      <Row noDivider>
+        <p className="text-[11px] mb-3 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+          When something goes wrong, these make it easy to share what happened without the terminal.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={async () => {
+              try { await invoke('open_log_file'); flash('ok', 'Revealed in Finder'); }
+              catch (e) { flash('err', String(e)); }
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95"
+            style={btnStyle}
+          >
+            View log file
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                const n = await invoke<number>('copy_log_to_clipboard');
+                flash('ok', `Copied ${n.toLocaleString()} bytes to clipboard`);
+              } catch (e) { flash('err', String(e)); }
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95"
+            style={btnStyle}
+          >
+            Copy log to clipboard
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                const p = await invoke<string>('export_diagnostics_bundle', { peerLog: null });
+                flash('ok', `Saved ${p.split('/').pop() ?? p}`);
+              } catch (e) { flash('err', String(e)); }
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95"
+            style={btnStyle}
+          >
+            Export diagnostics bundle
+          </button>
+          <button
+            onClick={async () => {
+              if (!connectedPeer || !peerSupportsLogPull || pullBusy) return;
+              setPullBusy(true);
+              flash('ok', 'Asking peer… accept the modal on their machine');
+              try {
+                const localName = appStatus?.device_name ?? 'this device';
+                const peerLog = await invoke<string>('request_peer_logs', {
+                  localDeviceName: localName,
+                });
+                if (!peerLog) {
+                  flash('err', 'Peer declined or did not respond');
+                } else {
+                  const p = await invoke<string>('export_diagnostics_bundle', { peerLog });
+                  flash('ok', `Saved bundle with peer log · ${p.split('/').pop() ?? p}`);
+                }
+              } catch (e) { flash('err', String(e)); }
+              finally { setPullBusy(false); }
+            }}
+            disabled={!connectedPeer || !peerSupportsLogPull || pullBusy}
+            title={
+              !connectedPeer ? 'Connect to a peer first' :
+              !peerSupportsLogPull ? (peerAppVersion ? `Peer is on v${peerAppVersion}; requires v0.3.8+` : 'Peer version unknown yet') :
+              'Request the peer\u2019s log tail and save a combined bundle'
+            }
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:active:scale-100"
+            style={(!connectedPeer || !peerSupportsLogPull || pullBusy) ? disabledStyle : btnStyle}
+          >
+            {pullBusy ? 'Waiting on peer\u2026' : 'Pull peer logs + export'}
+          </button>
+        </div>
+        <AnimatePresence>
+          {status && (
+            <motion.p
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="text-[11px] mt-2.5 leading-relaxed"
+              style={{ color: status.kind === 'ok' ? 'var(--success)' : 'var(--danger)' }}
+            >
+              {status.text}
+            </motion.p>
+          )}
+        </AnimatePresence>
+      </Row>
+    </Section>
+  );
+};
+
 /* ── Hotkeys & Input section ──
    Groups: mouse sensitivity, transition edge, release hotkey, two
    input-behaviour toggles, and the gaming-mode switch-hotkey editor. All
@@ -1191,6 +1352,9 @@ export const SettingsPage = () => {
           </>
         )}
       </Section>
+
+      {/* ── Diagnostics (v0.3.8 Phase E) ── */}
+      <DiagnosticsSection />
 
       {/* ── About ── */}
       <Section

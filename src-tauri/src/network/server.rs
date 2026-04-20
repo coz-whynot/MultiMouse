@@ -48,6 +48,10 @@ pub async fn start_server(app: AppHandle, state: Arc<AppState>) {
                 if let Err(e) = stream.set_nodelay(true) {
                     tracing::warn!("set_nodelay failed on accept from {}: {}", peer_addr, e);
                 }
+                // Enable TCP keepalive so a silently-dead peer is detected
+                // in ~45s (30s idle + 3x5s probes) rather than the kernel
+                // default of ~2h. See crate::network::tune_session_socket.
+                crate::network::tune_session_socket(&stream);
                 tracing::info!("Connection from {}", peer_addr);
                 let app = app.clone();
                 let state = state.clone();
@@ -455,10 +459,15 @@ pub async fn handle_controller(
     let (reader, writer) = stream.into_split();
     let mut reader = reader;
     let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Message>(256);
+    // Captured once at the start of the post-handshake session so the
+    // end-of-session summary line reports real session duration — useful
+    // when correlating "Connection from" with "session ended" in the log.
+    let session_started = std::time::Instant::now();
 
     // Writer task: owns the write half + encryption. A single consumer of the
     // channel means no lock contention and strict message ordering.
     let state_writer = state.clone();
+    let writer_peer_addr = peer_addr;
     let mut writer_task = {
         let mut writer = writer;
         let mut send_enc = send_enc;
@@ -468,6 +477,18 @@ pub async fn handle_controller(
                     state_writer.add_bytes_sent(data.len() as u64 + 32);
                 }
                 if !send_enc_message(&mut writer, &msg, &mut send_enc).await {
+                    // send_enc_message returns false on either a TCP write
+                    // error (peer dropped, network blip, half-open socket) or
+                    // on `Channel::seal` returning None (AEAD failure or
+                    // nonce-counter exhaustion). encryption.rs logs the seal
+                    // failure reason; here we log the high-level writer-exit
+                    // with the peer address so the timeline shows WHICH
+                    // session dropped.
+                    tracing::warn!(
+                        peer = %writer_peer_addr,
+                        msg_kind = ?std::mem::discriminant(&msg),
+                        "server writer: send_enc_message failed, closing session"
+                    );
                     break;
                 }
             }
@@ -716,17 +737,48 @@ pub async fn handle_controller(
                     }
                     Message::Ping { ts } => {
                         if write_tx.send(Message::Pong { ts }).await.is_err() {
+                            tracing::warn!(
+                                peer = %peer_addr,
+                                "server: Pong reply queue closed (writer task dead), ending session"
+                            );
                             break;
                         }
                     }
                     Message::PeerVersion { app_version } => {
+                        *state.peer_app_version.lock() = Some(app_version.clone());
                         let _ = app.emit("peer-version", app_version);
                     }
-                    Message::Bye => break,
+                    Message::LogRequest { requester_name } => {
+                        handle_log_request(&state, &app, &write_tx, requester_name).await;
+                    }
+                    Message::LogShare { content } => {
+                        // Someone on the server side initiated a pull and is
+                        // now getting the answer. Resolve the pending oneshot.
+                        if let Some(tx) = state.pending_log_pull.lock().take() {
+                            let _ = tx.send(content);
+                        }
+                    }
+                    Message::Bye => {
+                        tracing::info!(peer = %peer_addr, "server: received Bye from peer");
+                        break;
+                    }
                     _ => {}
                 }
             }
-            None => break, // parse error or connection closed
+            None => {
+                // read_enc_message returns None on: clean TCP close, read
+                // timeout, short frame, decrypt failure (AEAD tag mismatch
+                // or replay rejection — see encryption.rs::Channel::open),
+                // or serde_json parse error. encryption.rs now logs the
+                // specific decrypt reason; here we just record that the
+                // read loop observed EOF/error for THIS peer so the session
+                // timeline is unambiguous.
+                tracing::info!(
+                    peer = %peer_addr,
+                    "server read loop: stream closed or decrypt failed, ending session"
+                );
+                break;
+            }
         }
     }
 
@@ -746,6 +798,19 @@ pub async fn handle_controller(
         }
     }
 
+    // End-of-session summary: one line with duration + traffic so support
+    // bundles can show "session from X lasted Ys; received Zb / sent Wb".
+    // The individual "why did the loop exit" lines were emitted above
+    // (read-loop None, Bye received, disconnect signal, or writer failure);
+    // this is the aggregate record.
+    tracing::info!(
+        peer = %peer_addr,
+        duration_s = session_started.elapsed().as_secs(),
+        bytes_in = state.bytes_received.load(std::sync::atomic::Ordering::Relaxed),
+        bytes_out = state.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
+        "server: session ended"
+    );
+
     // Tear down helper tasks. Drop the main write_tx so the writer task
     // sees an empty channel and exits once its queue is drained.
     drop(write_tx);
@@ -762,6 +827,89 @@ pub async fn handle_controller(
     ).await;
     writer_task.abort();
     cleanup(&app, &state, &peer_id, &peer_name, &peer_ip).await;
+}
+
+/// Handle an inbound `Message::LogRequest`. Shared between the server
+/// read loop here and (via a thin wrapper) the client read loop — the
+/// only difference is the transport used for the reply, so that part
+/// is inlined per caller. This helper does the invariant part:
+/// rate-limit, user confirmation modal, log read.
+///
+/// Returns the log content to send back (empty string on reject / rate
+/// limit / unavailable). Reply-sending is the caller's responsibility so
+/// they can route via server-side `write_tx` or client-side `send_net`
+/// as appropriate.
+pub(crate) async fn resolve_log_request(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    requester_name: String,
+) -> String {
+    // Rate limit: at most 1 inbound LogRequest per minute. Logs "silently"
+    // return empty so the requester's UI unblocks instead of spinning on
+    // a modal the user never sees.
+    let allow = {
+        let mut slot = state.last_log_request.lock();
+        let now = std::time::Instant::now();
+        let ok = slot.map_or(true, |t| now.duration_since(t).as_secs() >= 60);
+        if ok { *slot = Some(now); }
+        ok
+    };
+    if !allow {
+        tracing::warn!(
+            requester = %requester_name,
+            "inbound LogRequest rate-limited (<60s since last); replying empty"
+        );
+        return String::new();
+    }
+
+    // Single-slot pending channel. If one is already in flight (shouldn't
+    // happen given the rate limit above, but guard anyway), fail fast
+    // rather than clobber the existing oneshot.
+    if state.pending_log_request.lock().is_some() {
+        tracing::warn!("inbound LogRequest while one already pending; replying empty");
+        return String::new();
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    *state.pending_log_request.lock() = Some(tx);
+    let _ = app.emit(
+        "log-request-received",
+        serde_json::json!({ "requester_name": requester_name }),
+    );
+
+    // User has 60s to accept/reject. If they ignore the modal, treat as
+    // reject — empty reply to the peer, no exfiltration by default.
+    let accepted = match tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        rx,
+    ).await {
+        Ok(Ok(a)) => a,
+        _ => {
+            *state.pending_log_request.lock() = None;
+            false
+        }
+    };
+
+    if accepted {
+        crate::network::read_log_tail_capped().await
+    } else {
+        tracing::info!("LogRequest rejected by local user (or timeout)");
+        String::new()
+    }
+}
+
+async fn handle_log_request(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    write_tx: &tokio::sync::mpsc::Sender<Message>,
+    requester_name: String,
+) {
+    let content = resolve_log_request(state, app, requester_name).await;
+    // Empty reply on reject/timeout/rate-limit so the requester's oneshot
+    // resolves instead of timing out with no signal.
+    if let Err(e) = write_tx.send(Message::LogShare { content }).await {
+        tracing::warn!(err = ?e, "server: failed to queue LogShare reply (writer dead)");
+    }
 }
 
 /// Small helper: await a JoinHandle without taking it by value so we can
@@ -823,6 +971,12 @@ async fn cleanup(
         }
     }
     *state.remote_screen.lock() = None;
+    // v0.3.8 Phase F: scrub peer_app_version + log-pull oneshots alongside
+    // the existing session-state reset so a fresh connection starts with
+    // no carried-over capability gating or pending reply channels.
+    *state.peer_app_version.lock() = None;
+    *state.pending_log_pull.lock() = None;
+    *state.pending_log_request.lock() = None;
     state.set_relaying(false);
     state.set_controlled(false);
     state.reset_bandwidth();

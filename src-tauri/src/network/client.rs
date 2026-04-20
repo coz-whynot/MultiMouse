@@ -88,6 +88,11 @@ pub async fn connect(
             if let Err(e) = s.set_nodelay(true) {
                 tracing::warn!("set_nodelay failed on {}: {}", addr, e);
             }
+            // Enable TCP keepalive so a silently-dead peer is detected in
+            // ~45s rather than the kernel default ~2h. Must be applied
+            // BEFORE into_split() (called later in connect_stream) because
+            // the split halves don't expose the file descriptor.
+            crate::network::tune_session_socket(&s);
             s
         }
         Ok(Err(e)) => {
@@ -279,6 +284,11 @@ pub async fn connect_stream(
 
     let (mut reader, mut writer) = stream.into_split();
 
+    // Captured once at the start of the post-handshake session so the
+    // end-of-session summary log can report real session duration.
+    let session_started = std::time::Instant::now();
+    let writer_peer_id = peer.id.clone();
+
     // Writer task: drains net_rx and sends encrypted messages to remote
     let state_writer = state.clone();
     tokio::spawn(async move {
@@ -299,12 +309,25 @@ pub async fn connect_stream(
                 NetCommand::ClipboardImage { width, height, bytes } =>
                     Message::ClipboardImage { width, height, bytes },
                 NetCommand::Ping(ts) => Message::Ping { ts },
+                NetCommand::LogRequest { requester_name } =>
+                    Message::LogRequest { requester_name },
+                NetCommand::LogShare { content } => Message::LogShare { content },
                 NetCommand::Disconnect => unreachable!(),
             };
             if let Ok(data) = serde_json::to_vec(&msg) {
                 state_writer.add_bytes_sent(data.len() as u64 + 32);
             }
             if !send_enc_message(&mut writer, &msg, &mut send_enc).await {
+                // Writer task exit: TCP write failed, OR the encryption
+                // channel's `seal()` returned None (AEAD or nonce-counter
+                // exhaustion — see encryption.rs). Either way the session
+                // can no longer send, so we exit the writer. The read loop
+                // will notice when the peer closes its end, or when our
+                // next Ping reply doesn't land.
+                tracing::warn!(
+                    peer_id = %writer_peer_id,
+                    "client writer: send_enc_message failed, ending writer task"
+                );
                 break;
             }
         }
@@ -331,16 +354,72 @@ pub async fn connect_stream(
         }
     });
 
+    // Pong watchdog. The client sends a Ping every 5s above; the peer replies
+    // with a Pong that bumps `state.last_pong` in the read loop below. If
+    // three consecutive Pongs fail to arrive (15s window), we treat the peer
+    // as frozen and tear down the session. This catches the case where TCP
+    // keepalive (Phase C) reports the socket as "alive" — e.g. the peer's
+    // process is stalled but its kernel still answers keepalive probes —
+    // and the writer task looks fine but no meaningful messages flow back.
+    //
+    // `state.last_pong` is reset at `state.start_session()` to prevent a
+    // stale pre-session timestamp from firing the watchdog on reconnect.
+    let state_pongwatch = state.clone();
+    let pongwatch_peer_id = peer.id.clone();
+    let pong_watchdog = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            if state_pongwatch.net_tx.lock().is_none() { break; }
+            let elapsed = state_pongwatch.last_pong.lock().elapsed();
+            if elapsed.as_secs() >= 15 {
+                tracing::warn!(
+                    peer_id = %pongwatch_peer_id,
+                    elapsed_s = elapsed.as_secs(),
+                    "client pong watchdog: no Pong in 15s (peer frozen or TCP half-open) — tearing down session"
+                );
+                // Drop net_tx so the writer task exits; that in turn closes
+                // our write half, which gives the peer TCP FIN and lets
+                // the read loop fall through to cleanup.
+                *state_pongwatch.net_tx.lock() = None;
+                break;
+            }
+        }
+    });
+
     // Single-threaded read loop — never cancelled mid-read. On stream close
     // read_enc_message returns None and we fall through to cleanup.
     let peer_id_ping = peer.id.clone();
-    while let Some(msg) = read_enc_message(&mut reader, &mut recv_enc).await {
+    loop {
+        let msg = match read_enc_message(&mut reader, &mut recv_enc).await {
+            Some(m) => m,
+            None => {
+                // Read loop terminated because: TCP stream closed (peer went
+                // away, network drop, Phase C keepalive), decrypt failed
+                // (AEAD mismatch / replay — see encryption.rs::Channel::open
+                // for the reason), or JSON parse failed. encryption.rs logs
+                // the specific decrypt reason; here we anchor the session
+                // timeline with which peer dropped and when.
+                tracing::info!(
+                    peer_id = %peer.id,
+                    "client read loop: stream closed or decrypt failed, ending session"
+                );
+                break;
+            }
+        };
         if let Ok(data) = serde_json::to_vec(&msg) {
             state.add_bytes_received(data.len() as u64 + 32);
         }
         match msg {
-            Message::Bye => break,
+            Message::Bye => {
+                tracing::info!(peer_id = %peer.id, "client: received Bye from peer");
+                break;
+            }
             Message::Pong { ts } => {
+                // Bump liveness clock BEFORE doing any other work so a slow
+                // lock-contended peers update doesn't starve the watchdog.
+                *state.last_pong.lock() = std::time::Instant::now();
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -355,7 +434,27 @@ pub async fn connect_stream(
                 let _ = app.emit("remote-active-window", app_name);
             }
             Message::PeerVersion { app_version } => {
+                *state.peer_app_version.lock() = Some(app_version.clone());
                 let _ = app.emit("peer-version", app_version);
+            }
+            Message::LogRequest { requester_name } => {
+                // Mirror of server.rs handler — shared user-modal flow via
+                // `resolve_log_request`, reply routed through the client's
+                // net_tx (NetCommand::LogShare) instead of the server's
+                // direct write channel.
+                let content = crate::network::server::resolve_log_request(
+                    &state, &app, requester_name,
+                ).await;
+                state.send_net(NetCommand::LogShare { content });
+            }
+            Message::LogShare { content } => {
+                // Either our `request_peer_logs` command is waiting, or this
+                // is an unsolicited reply (e.g. ghost from a prior request
+                // timed out). Resolve the channel if present; ignore
+                // otherwise.
+                if let Some(tx) = state.pending_log_pull.lock().take() {
+                    let _ = tx.send(content);
+                }
             }
             Message::EndedByPeer => {
                 // The other side clicked End/Disconnect. Mark our own
@@ -392,6 +491,17 @@ pub async fn connect_stream(
         }
     }
 
+    // End-of-session summary, mirrors server.rs. One line anchoring the
+    // timeline: how long was the session, how much traffic moved. The
+    // individual "why" lines were logged above on each exit path.
+    tracing::info!(
+        peer_id = %peer.id,
+        duration_s = session_started.elapsed().as_secs(),
+        bytes_in = state.bytes_received.load(std::sync::atomic::Ordering::Relaxed),
+        bytes_out = state.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
+        "client: session ended"
+    );
+
     // Phase 6 — release burst. If we were holding any modifiers when
     // the session ended, send synthetic KeyReleases before the socket
     // closes. Only works on graceful end (net_tx still alive); if the
@@ -405,8 +515,12 @@ pub async fn connect_stream(
         ));
     }
 
-    // Stop the ping task so it doesn't outlive the session.
+    // Stop the ping + pong-watchdog tasks so they don't outlive the session.
+    // Both must be aborted on every exit path (Bye, EndedByPeer, ReturnToSender,
+    // read-EOF, writer-dead) — this cleanup runs unconditionally after the
+    // read loop.
     ping_task.abort();
+    pong_watchdog.abort();
 
     {
         let mut peers = state.peers.lock();
@@ -418,6 +532,12 @@ pub async fn connect_stream(
     *state.net_tx.lock() = None;
     *state.remote_screen.lock() = None;
     *state.relay_entry.lock() = None;
+    // v0.3.8 Phase F: scrub peer_app_version + any stale log-pull oneshots
+    // so a future session starts with a clean capability gate and no
+    // cross-session reply resolution.
+    *state.peer_app_version.lock() = None;
+    *state.pending_log_pull.lock() = None;
+    *state.pending_log_request.lock() = None;
     state.set_relaying(false);
     state.reset_bandwidth();
     state.reset_edge_state();
@@ -499,6 +619,7 @@ fn reconnect_with_backoff(
                     if let Err(e) = s.set_nodelay(true) {
                         tracing::warn!("set_nodelay failed on {}: {}", addr, e);
                     }
+                    crate::network::tune_session_socket(&s);
                     s
                 }
                 Ok(Err(e)) => {
