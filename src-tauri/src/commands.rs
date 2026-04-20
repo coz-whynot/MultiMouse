@@ -1261,6 +1261,202 @@ pub async fn download_release_asset(
     Ok(out_path.to_string_lossy().into_owned())
 }
 
+/// v0.3.17 — macOS-only. Given a downloaded `.dmg` path, spawn a
+/// detached shell script that waits briefly for THIS app to quit, then
+/// mounts the DMG, replaces `/Applications/MultiMouse.app` with the
+/// contained bundle, unmounts, strips the quarantine xattr, and
+/// launches the freshly installed app. Returns immediately once the
+/// script is spawned; the caller is expected to quit the app shortly
+/// after.
+///
+/// Why a shell script (not a direct Rust spawn): every step of the
+/// flow — mount, copy, unmount, launch — has to run AFTER the current
+/// MultiMouse process has exited, otherwise the .app bundle it's
+/// running from can't be safely replaced. A detached script that
+/// outlives its parent is the simplest way to get that ordering on
+/// macOS without complicated process supervision.
+///
+/// Windows / Linux: returns an informative error. Windows installers
+/// are `.exe` files — opening one runs its own installer UI and is
+/// already handled by the "Download" button's reveal-in-Finder step.
+/// Linux `.AppImage` files are self-contained — user marks them +x
+/// and runs; no uninstall needed.
+#[tauri::command]
+pub async fn install_downloaded_asset(asset_path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if !asset_path.ends_with(".dmg") {
+            return Err(format!(
+                "Auto-install only handles .dmg files (got {}). \
+                 Use the \u{201C}Reveal\u{201D} path and install manually.",
+                asset_path
+            ));
+        }
+        if !std::path::Path::new(&asset_path).exists() {
+            return Err(format!("Downloaded file not found: {}", asset_path));
+        }
+
+        // Build the installer script. Inlined here rather than bundled
+        // as a resource so `cargo build` stays the single source of
+        // truth. If any step fails the script surfaces the error via
+        // a user-readable AppleScript dialog — important because once
+        // MultiMouse quits, the user has no other UI to see progress.
+        let script = format!(
+            r#"#!/bin/bash
+set -e
+DMG="{dmg}"
+TARGET="/Applications/MultiMouse.app"
+
+# 1. Wait briefly for the parent MultiMouse to fully exit.
+sleep 3
+pkill -f "/Applications/MultiMouse.app/Contents/MacOS" 2>/dev/null || true
+sleep 1
+
+# 2. Mount the DMG (no Finder window popup) and remember the mount point.
+MOUNT=$(hdiutil attach "$DMG" -nobrowse -noautoopen -noverify 2>/dev/null | tail -1 | awk -F'\t' '{{print $NF}}' | sed 's/^[[:space:]]*//')
+if [ -z "$MOUNT" ] || [ ! -d "$MOUNT" ]; then
+  /usr/bin/osascript -e 'display dialog "MultiMouse installer: failed to mount DMG." buttons {{"OK"}} with icon stop' || true
+  exit 1
+fi
+
+# 3. Find the .app inside the mount.
+APP_SRC=$(find "$MOUNT" -maxdepth 2 -name "*.app" -type d | head -1)
+if [ -z "$APP_SRC" ]; then
+  /usr/bin/osascript -e 'display dialog "MultiMouse installer: no .app found inside the DMG." buttons {{"OK"}} with icon stop' || true
+  hdiutil detach "$MOUNT" -quiet -force 2>/dev/null || true
+  exit 1
+fi
+
+# 4. Replace the installed app.
+/bin/rm -rf "$TARGET"
+/bin/cp -R "$APP_SRC" "/Applications/"
+
+# 5. Unmount.
+hdiutil detach "$MOUNT" -quiet -force 2>/dev/null || true
+
+# 6. Strip the "downloaded from the internet" quarantine flag so
+#    Gatekeeper doesn't re-prompt — the user already confirmed the
+#    install via an in-app button, no need to make them re-confirm.
+/usr/bin/xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+
+# 7. Launch the newly installed app.
+/usr/bin/open "$TARGET"
+"#,
+            dmg = asset_path.replace('"', "\\\"")
+        );
+
+        // Write the script to a temp file.
+        let tmp = std::env::temp_dir().join(format!(
+            "mm-install-{}.sh",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        let tmp_clone = tmp.clone();
+        let script_for_write = script.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(&tmp_clone, script_for_write))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("write installer script: {}", e))?;
+        // chmod +x.
+        let tmp_chmod = tmp.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&tmp_chmod, perms)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("chmod +x installer script: {}", e))?;
+
+        // Spawn it detached from the parent — double-fork so the script
+        // survives our exit. `nohup` + `&` + stdout/stderr-to-null
+        // keeps it an orphan owned by init.
+        let spawn = std::process::Command::new("/bin/bash")
+            .arg("-c")
+            .arg(format!(
+                "nohup /bin/bash {} >/dev/null 2>&1 &",
+                tmp.to_string_lossy()
+            ))
+            .spawn();
+        match spawn {
+            Ok(_child) => {
+                tracing::info!("Auto-install: spawned {} for {}", tmp.display(), asset_path);
+                Ok(())
+            }
+            Err(e) => Err(format!("spawn installer: {}", e)),
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if !asset_path.to_lowercase().ends_with(".exe") {
+            return Err(format!(
+                "Auto-install on Windows expects the .exe setup installer (got {})",
+                asset_path
+            ));
+        }
+        if !std::path::Path::new(&asset_path).exists() {
+            return Err(format!("Downloaded file not found: {}", asset_path));
+        }
+
+        // Strategy: write a .bat that waits for MultiMouse to exit, runs
+        // the installer interactively (so the user sees progress + the
+        // "Run MultiMouse" checkbox on the NSIS finish page), and then
+        // the installer itself handles the actual launch. NSIS upgrades
+        // in place — it'll replace the existing per-user install at
+        // %LOCALAPPDATA%\Programs\MultiMouse. If MultiMouse is still
+        // running when the installer starts, NSIS prompts the user to
+        // close it; the taskkill step here tries to avoid that dialog.
+        let script = format!(
+            "@echo off\r\n\
+             REM v0.3.17 auto-install\r\n\
+             timeout /t 3 /nobreak >nul\r\n\
+             taskkill /F /IM multimouse.exe /T 2>nul\r\n\
+             timeout /t 1 /nobreak >nul\r\n\
+             start \"\" \"{installer}\"\r\n",
+            installer = asset_path.replace('"', "")
+        );
+
+        let tmp = std::env::temp_dir().join(format!(
+            "mm-install-{}.bat",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        let tmp_clone = tmp.clone();
+        let script_for_write = script.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(&tmp_clone, script_for_write))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("write installer script: {}", e))?;
+
+        // Detach via `cmd /c start /min /b "" "script.bat"` — the nested
+        // `start` tells cmd to spawn the bat as an independent process
+        // group so it survives our exit. Without this, Rust's default
+        // spawn inherits our lifetime and the script dies mid-install.
+        use std::os::windows::process::CommandExt;
+        let spawn = std::process::Command::new("cmd")
+            .args(["/c", "start", "/min", "/b", ""])
+            .arg(tmp.as_os_str())
+            .creation_flags(0x0000_0008) // DETACHED_PROCESS
+            .spawn();
+        match spawn {
+            Ok(_child) => {
+                tracing::info!("Auto-install: spawned {} for {}", tmp.display(), asset_path);
+                Ok(())
+            }
+            Err(e) => Err(format!("spawn installer: {}", e)),
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = asset_path;
+        Err("Auto-install isn't wired for Linux yet. Make the downloaded .AppImage executable (`chmod +x`) and run it manually.".into())
+    }
+}
+
 /// Return whether `rdev::grab` succeeded at startup. When false, input
 /// capture fell back to listen-only because macOS Accessibility / Input
 /// Monitoring (or the Windows equivalent) isn't granted. The UI polls

@@ -346,6 +346,7 @@ pub fn run() {
             commands::open_input_permissions,
             commands::list_releases,
             commands::download_release_asset,
+            commands::install_downloaded_asset,
             hide_window,
         ])
         .on_window_event(|window, event| {

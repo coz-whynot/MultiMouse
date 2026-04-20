@@ -205,6 +205,11 @@ const VersionHistorySection = () => {
   const [error, setError] = useState<string | null>(null);
   const [busyTag, setBusyTag] = useState<string | null>(null);
   const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  // v0.3.17 — after a successful download we hold onto the local path
+  // so the "Install now" button can hand it to the backend auto-install
+  // command. Cleared on every new download to avoid running a stale path.
+  const [pendingInstall, setPendingInstall] = useState<{ tag: string; path: string } | null>(null);
+  const [confirmTag, setConfirmTag] = useState<string | null>(null);
 
   const flash = (kind: 'ok' | 'err', text: string) => {
     setStatus({ kind, text });
@@ -324,12 +329,14 @@ const VersionHistorySection = () => {
                     disabled={busyTag !== null}
                     onClick={async () => {
                       setBusyTag(r.tag_name);
+                      setPendingInstall(null);
                       try {
                         const p = await invoke<string>('download_release_asset', {
                           tag: r.tag_name,
                           assetName: r.install_asset,
                         });
-                        flash('ok', `Saved ${p.split('/').pop() ?? p} to Downloads — open it to install`);
+                        setPendingInstall({ tag: r.tag_name, path: p });
+                        flash('ok', `Saved ${p.split('/').pop() ?? p} — click \u201CInstall now\u201D below to apply`);
                       } catch (e) {
                         flash('err', String(e));
                       } finally { setBusyTag(null); }
@@ -364,6 +371,129 @@ const VersionHistorySection = () => {
             >
               {status.text}
             </motion.p>
+          )}
+        </AnimatePresence>
+
+        {/* v0.3.17 — "Install now" control. Shown only while a downloaded
+            asset is staged. Click → confirm modal → backend spawns the
+            detached installer script + we ask the app to quit. */}
+        <AnimatePresence>
+          {pendingInstall && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-3 overflow-hidden"
+            >
+              <div
+                className="rounded-xl px-3 py-2.5 flex items-center gap-2 flex-wrap"
+                style={{
+                  background: 'var(--accent-soft-bg)',
+                  border: '1px solid var(--accent-soft-br)',
+                }}
+              >
+                <p className="text-[11px] flex-1 min-w-0" style={{ color: 'var(--accent-primary)' }}>
+                  Ready to replace the running app with <b>{pendingInstall.tag}</b>. MultiMouse will close and re-open automatically.
+                </p>
+                <button
+                  onClick={() => setConfirmTag(pendingInstall.tag)}
+                  className="flex-shrink-0 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all active:scale-95"
+                  style={{
+                    background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                    color: 'white',
+                  }}
+                >
+                  Install now
+                </button>
+                <button
+                  onClick={() => setPendingInstall(null)}
+                  className="flex-shrink-0 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-all active:scale-95"
+                  style={{
+                    background: 'var(--bg-subtle)',
+                    border: '1px solid var(--border-subtle)',
+                    color: 'var(--text-muted)',
+                  }}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Confirm modal — double-check before closing the running app. */}
+        <AnimatePresence>
+          {confirmTag && pendingInstall && confirmTag === pendingInstall.tag && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center p-6"
+              style={{ background: 'rgba(0,0,0,0.55)' }}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="w-full max-w-sm rounded-2xl p-5"
+                style={{
+                  background: 'var(--bg-card)',
+                  border: '1px solid var(--border-strong)',
+                  boxShadow: '0 16px 48px rgba(0,0,0,0.45)',
+                }}
+              >
+                <p className="text-base font-semibold mb-1.5" style={{ color: 'var(--text-primary)' }}>
+                  Install {pendingInstall.tag}?
+                </p>
+                <p className="text-xs leading-relaxed mb-4" style={{ color: 'var(--text-muted)' }}>
+                  The current MultiMouse will close. The installer will replace the app and reopen it automatically. On macOS you may need to re-grant Accessibility + Input Monitoring after install (v0.3.15+ clears stale entries automatically).
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setConfirmTag(null)}
+                    className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-all active:scale-[0.97]"
+                    style={{
+                      background: 'var(--bg-subtle)',
+                      border: '1px solid var(--border-subtle)',
+                      color: 'var(--text-body)',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const p = pendingInstall.path;
+                      try {
+                        await invoke('install_downloaded_asset', { assetPath: p });
+                        // Hand off — close the window; the detached
+                        // installer will kill us, replace us, and
+                        // relaunch us. Give it a breath so our log
+                        // write has time to flush.
+                        window.setTimeout(() => {
+                          invoke('hide_window').catch(() => {});
+                          // Quit via the process plugin so the app
+                          // actually exits (not just hides). Imported
+                          // dynamically because this path is rare.
+                          import('@tauri-apps/plugin-process')
+                            .then((m) => m.exit(0))
+                            .catch(() => {});
+                        }, 400);
+                      } catch (e) {
+                        flash('err', String(e));
+                        setConfirmTag(null);
+                      }
+                    }}
+                    className="flex-1 py-2.5 rounded-xl text-sm font-bold transition-all active:scale-[0.97]"
+                    style={{
+                      background: 'linear-gradient(135deg, #6366f1, #a855f7)',
+                      color: 'white',
+                    }}
+                  >
+                    Install &amp; restart
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
           )}
         </AnimatePresence>
       </Row>
